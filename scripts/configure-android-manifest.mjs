@@ -13,6 +13,10 @@ if (fs.existsSync(manifestPath)) {
     'android.permission.CHANGE_NETWORK_STATE',
     'android.permission.WRITE_EXTERNAL_STORAGE',
     'android.permission.READ_EXTERNAL_STORAGE',
+    'android.permission.MANAGE_EXTERNAL_STORAGE',
+    'android.permission.READ_MEDIA_IMAGES',
+    'android.permission.READ_MEDIA_VIDEO',
+    'android.permission.READ_MEDIA_AUDIO',
     'android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS',
     'android.permission.WAKE_LOCK',
     'android.permission.FOREGROUND_SERVICE',
@@ -33,7 +37,7 @@ if (fs.existsSync(manifestPath)) {
   if (!xml.includes('android:usesCleartextTraffic')) {
     xml = xml.replace(
       '<application',
-      '<application\n        android:usesCleartextTraffic="true"\n        android:requestLegacyExternalStorage="true"'
+      '<application\n        android:usesCleartextTraffic="true"\n        android:requestLegacyExternalStorage="true"\n        android:preserveLegacyExternalStorage="true"'
     );
   }
 
@@ -94,7 +98,7 @@ if (fs.existsSync(manifestPath)) {
   console.log('Successfully injected Net Plus Pro permissions & Browser Download Interceptor into AndroidManifest.xml');
 }
 
-// Inject Native Multi-Thread Internal Storage Downloader into MainActivity.java
+// Inject Native Multi-Thread Internal Storage Downloader & Permission Manager into MainActivity.java
 const mainActivityDir = path.join(
   process.cwd(),
   'android',
@@ -111,12 +115,19 @@ const mainActivityPath = path.join(mainActivityDir, 'MainActivity.java');
 if (fs.existsSync(mainActivityDir)) {
   const javaCode = `package com.netplus.pro;
 
+import android.Manifest;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.media.MediaScannerConnection;
+import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.PowerManager;
+import android.provider.Settings;
 import android.util.Base64;
 import android.webkit.JavascriptInterface;
+import android.webkit.URLUtil;
 import android.webkit.WebView;
 
 import com.getcapacitor.BridgeActivity;
@@ -130,6 +141,8 @@ import java.io.InputStream;
 import java.io.RandomAccessFile;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -148,6 +161,7 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         handleIncomingIntent(getIntent());
+        requestInitialRuntimePermissions();
 
         if (getBridge() != null && getBridge().getWebView() != null) {
             WebView webView = getBridge().getWebView();
@@ -158,10 +172,57 @@ public class MainActivity extends BridgeActivity {
     }
 
     @Override
+    public void onResume() {
+        super.onResume();
+        notifyPermissionStateToJs();
+    }
+
+    @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
         handleIncomingIntent(intent);
+    }
+
+    private void requestInitialRuntimePermissions() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            List<String> needed = new ArrayList<>();
+            if (Build.VERSION.SDK_INT <= 32) {
+                if (checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+                    needed.add(Manifest.permission.WRITE_EXTERNAL_STORAGE);
+                }
+                if (checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+                    needed.add(Manifest.permission.READ_EXTERNAL_STORAGE);
+                }
+            }
+            if (Build.VERSION.SDK_INT >= 33) {
+                if (checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
+                    needed.add("android.permission.POST_NOTIFICATIONS");
+                }
+            }
+            if (!needed.isEmpty()) {
+                requestPermissions(needed.toArray(new String[0]), 1001);
+            }
+        }
+    }
+
+    private boolean checkHasStoragePermissionInternal() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            return Environment.isExternalStorageManager();
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            return checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
+        }
+        return true;
+    }
+
+    private void notifyPermissionStateToJs() {
+        if (getBridge() == null || getBridge().getWebView() == null) return;
+        final WebView webView = getBridge().getWebView();
+        final boolean granted = checkHasStoragePermissionInternal();
+        webView.post(() -> webView.evaluateJavascript(
+            "if (window.__onStoragePermissionChanged) { window.__onStoragePermissionChanged(" + granted + "); }",
+            null
+        ));
     }
 
     private void handleIncomingIntent(Intent intent) {
@@ -172,7 +233,7 @@ public class MainActivity extends BridgeActivity {
             url = intent.getDataString();
         } else if (Intent.ACTION_SEND.equals(action)) {
             String sharedText = intent.getStringExtra(Intent.EXTRA_TEXT);
-            if (sharedText != null && (sharedText.startsWith("http://") || sharedText.startsWith("https://"))) {
+            if (sharedText != null && (sharedText.contains("http://") || sharedText.contains("https://"))) {
                 url = sharedText.trim();
             }
         }
@@ -194,7 +255,124 @@ public class MainActivity extends BridgeActivity {
         });
     }
 
+    private static String resolveExtension(String name, String contentType) {
+        if (name != null) {
+            int dot = name.lastIndexOf('.');
+            if (dot > 0 && dot >= name.length() - 7) {
+                String ext = name.substring(dot).toLowerCase();
+                if (ext.matches("^\\\\.[a-z0-9]{1,6}$") && !".bin".equals(ext)) {
+                    return ext;
+                }
+            }
+        }
+        String ct = contentType != null ? contentType.toLowerCase() : "";
+        if (ct.contains("android.package-archive")) return ".apk";
+        if (ct.contains("zip")) return ".zip";
+        if (ct.contains("rar")) return ".rar";
+        if (ct.contains("7z")) return ".7z";
+        if (ct.contains("pdf")) return ".pdf";
+        if (ct.contains("mp4") || ct.contains("video")) return ".mp4";
+        if (ct.contains("mpeg") || ct.contains("mp3") || ct.contains("audio")) return ".mp3";
+        if (ct.contains("jpeg") || ct.contains("jpg")) return ".jpg";
+        if (ct.contains("png")) return ".png";
+        if (ct.contains("iso")) return ".iso";
+        return ".bin";
+    }
+
+    /**
+     * Strictly caps the filename at <= 50 characters so Linux/Android FUSE/ext4 NEVER throws ENAMETOOLONG.
+     */
+    private static String buildShortSafeFileName(String requestedName, String guessedName, String contentType) {
+        String candidate = (guessedName != null && !guessedName.isEmpty() && !"downloadfile.bin".equalsIgnoreCase(guessedName))
+            ? guessedName
+            : (requestedName != null && !requestedName.isEmpty() ? requestedName : "NetPlus_Download.bin");
+
+        candidate = candidate.replaceAll("[^a-zA-Z0-9._-]", "_").replaceAll("_+", "_");
+        String ext = resolveExtension(candidate, contentType);
+
+        int dot = candidate.lastIndexOf('.');
+        String base = (dot > 0 && dot >= candidate.length() - 8) ? candidate.substring(0, dot) : candidate;
+        if (base.isEmpty()) base = "NetPlus_File";
+
+        if (base.length() > 38) {
+            String prefix = base.substring(0, 16);
+            String suffix = base.substring(base.length() - 8);
+            base = "NetPlus_" + prefix + "_" + suffix;
+        }
+        if (base.length() > 38) {
+            base = base.substring(0, 38);
+        }
+        return base + ext;
+    }
+
+    private static File createUniqueOutputFile(File dir, String safeFileName) {
+        File candidate = new File(dir, safeFileName);
+        if (!candidate.exists()) return candidate;
+
+        int dot = safeFileName.lastIndexOf('.');
+        String base = dot > 0 ? safeFileName.substring(0, dot) : safeFileName;
+        String ext = dot > 0 ? safeFileName.substring(dot) : "";
+        for (int i = 1; i < 1000; i++) {
+            File next = new File(dir, base + "_" + i + ext);
+            if (!next.exists()) return next;
+        }
+        return new File(dir, base + "_" + (System.currentTimeMillis() % 10000) + ext);
+    }
+
     public class NativeDownloadBridge {
+        @JavascriptInterface
+        public boolean hasStoragePermission() {
+            return checkHasStoragePermissionInternal();
+        }
+
+        @JavascriptInterface
+        public void requestStoragePermission() {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    if (!Environment.isExternalStorageManager()) {
+                        try {
+                            Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
+                            intent.setData(Uri.parse("package:" + getPackageName()));
+                            startActivity(intent);
+                        } catch (Exception e) {
+                            Intent intent = new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION);
+                            startActivity(intent);
+                        }
+                    } else {
+                        notifyPermissionStateToJs();
+                    }
+                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    requestPermissions(
+                        new String[]{
+                            Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                            Manifest.permission.READ_EXTERNAL_STORAGE
+                        },
+                        1002
+                    );
+                }
+            } catch (Exception e) {
+                try {
+                    Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+                    intent.setData(Uri.parse("package:" + getPackageName()));
+                    startActivity(intent);
+                } catch (Exception ignored) {}
+            }
+        }
+
+        @JavascriptInterface
+        public void requestBatteryOptimizationBypass() {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+                    if (pm != null && !pm.isIgnoringBatteryOptimizations(getPackageName())) {
+                        Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                        intent.setData(Uri.parse("package:" + getPackageName()));
+                        startActivity(intent);
+                    }
+                }
+            } catch (Exception ignored) {}
+        }
+
         @JavascriptInterface
         public String consumePendingInterceptedUrl() {
             String u = pendingInterceptedUrl;
@@ -219,8 +397,8 @@ public class MainActivity extends BridgeActivity {
             try {
                 File dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
                 if (!dir.exists()) dir.mkdirs();
-                String safeName = fileName.replaceAll("[^a-zA-Z0-9._-]", "_");
-                File outFile = new File(dir, safeName);
+                String safeName = buildShortSafeFileName(fileName, fileName, "application/octet-stream");
+                File outFile = createUniqueOutputFile(dir, safeName);
                 byte[] bytes = Base64.decode(base64Data, Base64.DEFAULT);
                 try (FileOutputStream fos = new FileOutputStream(outFile)) {
                     fos.write(bytes);
@@ -257,6 +435,9 @@ public class MainActivity extends BridgeActivity {
                     String finalUrl = probeConn.getURL().toString();
                     String contentRange = probeConn.getHeaderField("Content-Range");
                     String acceptRanges = probeConn.getHeaderField("Accept-Ranges");
+                    String contentDisposition = probeConn.getHeaderField("Content-Disposition");
+                    String contentType = probeConn.getContentType();
+
                     long totalBytes = -1;
                     boolean supportsRanges = (status == 206) || (acceptRanges != null && acceptRanges.toLowerCase().contains("bytes"));
 
@@ -272,13 +453,29 @@ public class MainActivity extends BridgeActivity {
                     }
                     probeConn.disconnect();
 
+                    String guessedName = URLUtil.guessFileName(finalUrl, contentDisposition, contentType);
+                    String safeName = buildShortSafeFileName(requestedName, guessedName, contentType);
+
                     File downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
-                    if (!downloadDir.exists()) downloadDir.mkdirs();
+                    if (!downloadDir.exists()) {
+                        downloadDir.mkdirs();
+                    }
+                    File outFile = createUniqueOutputFile(downloadDir, safeName);
 
-                    String safeName = (requestedName != null && !requestedName.isEmpty() ? requestedName : "NetPlusPro_Download.bin")
-                        .replaceAll("[^a-zA-Z0-9._-]", "_");
-                    File outFile = new File(downloadDir, safeName);
+                    // Verify we can write to public Download folder; if restricted, fallback to app-accessible external Download dir
+                    try {
+                        try (RandomAccessFile testRaf = new RandomAccessFile(outFile, "rw")) {
+                            testRaf.seek(0);
+                        }
+                    } catch (Exception permEx) {
+                        File fallbackDir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+                        if (fallbackDir != null) {
+                            if (!fallbackDir.exists()) fallbackDir.mkdirs();
+                            outFile = createUniqueOutputFile(fallbackDir, safeName);
+                        }
+                    }
 
+                    final File targetFile = outFile;
                     final AtomicLong downloadedBytes = new AtomicLong(0);
                     final long startTimeMs = System.currentTimeMillis();
                     final long finalTotalBytes = totalBytes;
@@ -287,7 +484,7 @@ public class MainActivity extends BridgeActivity {
                     final long[] chunkSize = new long[activeThreads];
 
                     if (activeThreads > 1) {
-                        try (RandomAccessFile raf = new RandomAccessFile(outFile, "rw")) {
+                        try (RandomAccessFile raf = new RandomAccessFile(targetFile, "rw")) {
                             raf.setLength(totalBytes);
                         }
                         long partSize = totalBytes / activeThreads;
@@ -317,7 +514,7 @@ public class MainActivity extends BridgeActivity {
                                         partConn.setRequestProperty("Range", "bytes=" + offset + "-" + endByte);
 
                                         try (InputStream is = partConn.getInputStream();
-                                             RandomAccessFile partFile = new RandomAccessFile(outFile, "rw")) {
+                                             RandomAccessFile partFile = new RandomAccessFile(targetFile, "rw")) {
                                             partFile.seek(offset);
                                             byte[] buffer = new byte[64 * 1024];
                                             int read;
@@ -341,7 +538,6 @@ public class MainActivity extends BridgeActivity {
                             });
                         }
 
-                        // Progress reporter loop while chunks run
                         boolean allFinished = false;
                         while (!allFinished && !cancelledTasks.get(taskId).get()) {
                             allFinished = true;
@@ -351,16 +547,15 @@ public class MainActivity extends BridgeActivity {
                                     break;
                                 }
                             }
-                            emitProgress(taskId, downloadedBytes.get(), finalTotalBytes, startTimeMs, chunkDone, chunkSize, "downloading", outFile.getAbsolutePath(), "");
+                            emitProgress(taskId, targetFile.getName(), downloadedBytes.get(), finalTotalBytes, startTimeMs, chunkDone, chunkSize, "downloading", targetFile.getAbsolutePath(), "");
                             try { Thread.sleep(200); } catch (InterruptedException ignored) {}
                         }
                     } else {
-                        // Single stream fallback directly to Internal Storage Downloads folder
                         HttpURLConnection conn = (HttpURLConnection) new URL(finalUrl).openConnection();
                         conn.setInstanceFollowRedirects(true);
                         conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 15) Chrome/131.0.0.0 Mobile NetPlusPro/2.5");
                         try (InputStream is = conn.getInputStream();
-                             FileOutputStream fos = new FileOutputStream(outFile)) {
+                             FileOutputStream fos = new FileOutputStream(targetFile)) {
                             byte[] buf = new byte[64 * 1024];
                             int read;
                             long lastEmit = 0;
@@ -376,7 +571,7 @@ public class MainActivity extends BridgeActivity {
                                 long now = System.currentTimeMillis();
                                 if (now - lastEmit >= 200) {
                                     lastEmit = now;
-                                    emitProgress(taskId, curr, finalTotalBytes > 0 ? finalTotalBytes : curr, startTimeMs, chunkDone, chunkSize, "downloading", outFile.getAbsolutePath(), "");
+                                    emitProgress(taskId, targetFile.getName(), curr, finalTotalBytes > 0 ? finalTotalBytes : curr, startTimeMs, chunkDone, chunkSize, "downloading", targetFile.getAbsolutePath(), "");
                                 }
                             }
                         } finally {
@@ -387,20 +582,20 @@ public class MainActivity extends BridgeActivity {
                     if (!cancelledTasks.get(taskId).get()) {
                         MediaScannerConnection.scanFile(
                             getApplicationContext(),
-                            new String[]{ outFile.getAbsolutePath() },
+                            new String[]{ targetFile.getAbsolutePath() },
                             null,
                             null
                         );
                         long finalBytes = downloadedBytes.get();
-                        emitProgress(taskId, finalBytes, finalTotalBytes > 0 ? finalTotalBytes : finalBytes, startTimeMs, chunkDone, chunkSize, "completed", outFile.getAbsolutePath(), "");
+                        emitProgress(taskId, targetFile.getName(), finalBytes, finalTotalBytes > 0 ? finalTotalBytes : finalBytes, startTimeMs, chunkDone, chunkSize, "completed", targetFile.getAbsolutePath(), "");
                     }
                 } catch (Exception e) {
-                    emitProgress(taskId, 0, 0, System.currentTimeMillis(), new long[]{0}, new long[]{1}, "error", "", e.getMessage() != null ? e.getMessage() : "Download error");
+                    emitProgress(taskId, "", 0, 0, System.currentTimeMillis(), new long[]{0}, new long[]{1}, "error", "", e.getMessage() != null ? e.getMessage() : "Download error");
                 }
             });
         }
 
-        private void emitProgress(String taskId, long dlBytes, long totalBytes, long startMs, long[] chunkDone, long[] chunkSize, String status, String savedPath, String error) {
+        private void emitProgress(String taskId, String resolvedName, long dlBytes, long totalBytes, long startMs, long[] chunkDone, long[] chunkSize, String status, String savedPath, String error) {
             if (getBridge() == null || getBridge().getWebView() == null) return;
             final WebView webView = getBridge().getWebView();
             long elapsedMs = Math.max(100, System.currentTimeMillis() - startMs);
@@ -409,6 +604,7 @@ public class MainActivity extends BridgeActivity {
             try {
                 JSONObject payload = new JSONObject();
                 payload.put("taskId", taskId);
+                payload.put("fileName", resolvedName);
                 payload.put("downloadedBytes", dlBytes);
                 payload.put("totalBytes", totalBytes > 0 ? totalBytes : dlBytes);
                 payload.put("speedMBps", Math.round(speedMBps * 100.0) / 100.0);
@@ -435,7 +631,7 @@ public class MainActivity extends BridgeActivity {
 }
 `;
   fs.writeFileSync(mainActivityPath, javaCode, 'utf8');
-  console.log('Successfully generated native multi-thread Internal Storage downloader in MainActivity.java');
+  console.log('Successfully generated native multi-thread Internal Storage downloader & permission manager in MainActivity.java');
 }
 
 // Resize and copy the custom Net Plus Pro logo into Android mipmap launcher icon directories
@@ -473,12 +669,12 @@ if (fs.existsSync(logoPath) && fs.existsSync(resDir)) {
     { dir: 'mipmap-xxxhdpi', launcher: 192, foreground: 432 },
   ];
 
-  for (const spec of mipmapSpecs) {
-    const targetDir = path.join(resDir, spec.dir);
+  for (const dirSpec of mipmapSpecs) {
+    const targetDir = path.join(resDir, dirSpec.dir);
     if (fs.existsSync(targetDir)) {
-      copyOrResizeIcon(logoPath, path.join(targetDir, 'ic_launcher.png'), spec.launcher);
-      copyOrResizeIcon(logoPath, path.join(targetDir, 'ic_launcher_round.png'), spec.launcher);
-      copyOrResizeIcon(logoPath, path.join(targetDir, 'ic_launcher_foreground.png'), spec.foreground);
+      copyOrResizeIcon(logoPath, path.join(targetDir, 'ic_launcher.png'), dirSpec.launcher);
+      copyOrResizeIcon(logoPath, path.join(targetDir, 'ic_launcher_round.png'), dirSpec.launcher);
+      copyOrResizeIcon(logoPath, path.join(targetDir, 'ic_launcher_foreground.png'), dirSpec.foreground);
     }
   }
   console.log('Successfully configured Net Plus Pro custom launcher icons for Android APK.');

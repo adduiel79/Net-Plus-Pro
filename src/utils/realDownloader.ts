@@ -1,7 +1,8 @@
-import { validateDownloadUrl } from './networkEngine';
+import { validateDownloadUrl, sanitizeAndShortenFileName } from './networkEngine';
 
 export interface NativeDownloadUpdatePayload {
   taskId: string;
+  fileName?: string;
   downloadedBytes: number;
   totalBytes: number;
   speedMBps: number;
@@ -12,6 +13,9 @@ export interface NativeDownloadUpdatePayload {
 }
 
 interface NetPlusNativeDownloaderBridge {
+  hasStoragePermission?: () => boolean;
+  requestStoragePermission?: () => void;
+  requestBatteryOptimizationBypass?: () => void;
   consumePendingInterceptedUrl?: () => string;
   startMultiThreadDownload: (
     taskId: string,
@@ -29,6 +33,43 @@ declare global {
     NetPlusNativeDownloader?: NetPlusNativeDownloaderBridge;
     __onNativeDownloadUpdate?: (payload: NativeDownloadUpdatePayload) => void;
     __onBrowserDownloadIntercepted?: (url: string) => void;
+    __onStoragePermissionChanged?: (granted: boolean) => void;
+  }
+}
+
+export function checkNativeStoragePermission(): boolean {
+  if (typeof window !== 'undefined' && window.NetPlusNativeDownloader?.hasStoragePermission) {
+    try {
+      return Boolean(window.NetPlusNativeDownloader.hasStoragePermission());
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+export function requestNativeStoragePermission(): boolean {
+  if (typeof window !== 'undefined' && window.NetPlusNativeDownloader?.requestStoragePermission) {
+    try {
+      window.NetPlusNativeDownloader.requestStoragePermission();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+export function requestNativeBatteryBypass(): void {
+  if (
+    typeof window !== 'undefined' &&
+    window.NetPlusNativeDownloader?.requestBatteryOptimizationBypass
+  ) {
+    try {
+      window.NetPlusNativeDownloader.requestBatteryOptimizationBypass();
+    } catch {
+      // ignore
+    }
   }
 }
 
@@ -39,12 +80,14 @@ export interface RealDownloadCallbacks {
     acceptRanges: boolean;
   }) => void;
   onProgress: (progress: {
+    fileName?: string;
     downloadedBytes: number;
     totalBytes: number;
     speedMBps: number;
     etaSeconds: number;
     chunkProgress: number[];
     retryCount: number;
+    savedPath?: string;
   }) => void;
   onCompleted: (result: {
     fileName: string;
@@ -84,21 +127,30 @@ if (typeof window !== 'undefined') {
         ? Math.max(1, Math.round(remainingBytes / (payload.speedMBps * 1024 * 1024)))
         : 0;
 
+    const resolvedName =
+      payload.fileName ||
+      (payload.savedPath ? payload.savedPath.split('/').pop() : undefined);
+
     cb.onProgress({
+      fileName: resolvedName ? sanitizeAndShortenFileName(resolvedName) : undefined,
       downloadedBytes: payload.downloadedBytes,
       totalBytes: payload.totalBytes,
       speedMBps: payload.speedMBps,
       etaSeconds,
       chunkProgress: payload.chunkProgress || [],
       retryCount: 0,
+      savedPath: payload.savedPath || undefined,
     });
 
     if (payload.status === 'completed') {
+      const finalFileName = sanitizeAndShortenFileName(
+        resolvedName || 'NetPlus_Download.bin'
+      );
       cb.onCompleted({
-        fileName: payload.savedPath.split('/').pop() || 'Downloaded_File',
+        fileName: finalFileName,
         totalBytes: payload.totalBytes,
         checksumSha256: 'Verified (Internal Storage)',
-        savedPath: payload.savedPath || '/storage/emulated/0/Download/',
+        savedPath: payload.savedPath || `/storage/emulated/0/Download/${finalFileName}`,
         averageSpeedMBps: payload.speedMBps,
       });
       nativeCallbacks.delete(payload.taskId);
@@ -111,9 +163,10 @@ if (typeof window !== 'undefined') {
  */
 export function triggerSaveFileToStorage(blobUrl: string, fileName: string): void {
   if (typeof document === 'undefined' || !blobUrl) return;
+  const safeName = sanitizeAndShortenFileName(fileName);
   const link = document.createElement('a');
   link.href = blobUrl;
-  link.download = fileName;
+  link.download = safeName;
   link.style.display = 'none';
   document.body.appendChild(link);
   link.click();
@@ -181,19 +234,21 @@ export async function startRealMultiThreadDownload(params: {
   callbacks: RealDownloadCallbacks;
 }): Promise<void> {
   const { taskId, url, threads, unlimitedRetry, callbacks } = params;
-  const { fileName: initialFileName } = validateDownloadUrl(url);
+  const { fileName: initialFileName, normalizedUrl } = validateDownloadUrl(url);
+  const targetUrl = normalizedUrl || url.trim();
+  const safeInitialName = sanitizeAndShortenFileName(initialFileName);
 
   // 1. If running inside the compiled Android APK with Native Java Bridge, use native multi-thread Internal Storage engine
   if (
     typeof window !== 'undefined' &&
     window.NetPlusNativeDownloader &&
-    !url.startsWith('/api/')
+    !targetUrl.startsWith('/api/')
   ) {
     nativeCallbacks.set(taskId, callbacks);
     window.NetPlusNativeDownloader.startMultiThreadDownload(
       taskId,
-      url,
-      initialFileName,
+      targetUrl,
+      safeInitialName,
       threads
     );
     return;
@@ -208,26 +263,26 @@ export async function startRealMultiThreadDownload(params: {
   activeControls.set(taskId, control);
 
   try {
-    const isLocalSample = url.startsWith('/api/download/sample/');
-    let fileName = initialFileName;
+    const isLocalSample = targetUrl.startsWith('/api/download/sample/');
+    let fileName = safeInitialName;
     let totalBytes = 0;
     let acceptRanges = false;
     let contentType = 'application/octet-stream';
 
     if (isLocalSample) {
-      const headRes = await fetch(url, { method: 'HEAD' });
+      const headRes = await fetch(targetUrl, { method: 'HEAD' });
       totalBytes = parseInt(headRes.headers.get('content-length') || '0', 10) || 0;
       acceptRanges = (headRes.headers.get('accept-ranges') || '').includes('bytes');
       contentType = headRes.headers.get('content-type') || 'application/octet-stream';
     } else {
-      const probeRes = await fetch(`/api/download/probe?url=${encodeURIComponent(url)}`);
+      const probeRes = await fetch(`/api/download/probe?url=${encodeURIComponent(targetUrl)}`);
       if (probeRes.ok) {
         const meta = await probeRes.json();
         if (meta.ok) {
-          fileName = meta.fileName || initialFileName;
+          contentType = meta.contentType || 'application/octet-stream';
+          fileName = sanitizeAndShortenFileName(meta.fileName || safeInitialName, contentType);
           totalBytes = Number(meta.totalBytes) || 0;
           acceptRanges = Boolean(meta.acceptRanges);
-          contentType = meta.contentType || 'application/octet-stream';
         }
       }
     }
@@ -285,17 +340,18 @@ export async function startRealMultiThreadDownload(params: {
       });
 
       callbacks.onProgress({
+        fileName,
         downloadedBytes: totalDownloaded,
         totalBytes: effectiveTotal,
         speedMBps: currentSpeedMBps,
         etaSeconds,
         chunkProgress,
         retryCount,
+        savedPath: `/storage/emulated/0/Download/${fileName}`,
       });
     };
 
     if (activeThreads > 1 && totalBytes > 0) {
-      // Multi-Thread Parallel Byte-Range Downloading
       const partSize = Math.floor(totalBytes / activeThreads);
 
       const workers = Array.from({ length: activeThreads }, async (_, idx) => {
@@ -315,8 +371,8 @@ export async function startRealMultiThreadDownload(params: {
 
           try {
             const streamUrl = isLocalSample
-              ? url
-              : `/api/download/stream?url=${encodeURIComponent(url)}&start=${currentOffset}&end=${endByte}`;
+              ? targetUrl
+              : `/api/download/stream?url=${encodeURIComponent(targetUrl)}&start=${currentOffset}&end=${endByte}`;
 
             const headers: Record<string, string> = {};
             if (isLocalSample) {
@@ -371,15 +427,14 @@ export async function startRealMultiThreadDownload(params: {
 
       await Promise.all(workers);
     } else {
-      // Single-stream real binary reader fallback
       chunkTotal[0] = totalBytes;
       while (!control.cancelled) {
         const ac = new AbortController();
         control.abortControllers.add(ac);
         try {
           const streamUrl = isLocalSample
-            ? url
-            : `/api/download/stream?url=${encodeURIComponent(url)}`;
+            ? targetUrl
+            : `/api/download/stream?url=${encodeURIComponent(targetUrl)}`;
           const response = await fetch(streamUrl, { signal: ac.signal });
           if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);

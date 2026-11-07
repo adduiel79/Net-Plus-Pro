@@ -195,17 +195,27 @@ async function startServer() {
         fileName = decodeURIComponent(segs[segs.length - 1] || 'downloaded-file.bin');
       }
 
-      fileName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
-      if (!fileName.includes('.')) {
-        if (contentType.includes('android.package-archive')) fileName += '.apk';
-        else if (contentType.includes('zip')) fileName += '.zip';
-        else if (contentType.includes('pdf')) fileName += '.pdf';
-        else if (contentType.includes('mp4') || contentType.includes('video')) fileName += '.mp4';
-        else if (contentType.includes('mpeg') || contentType.includes('audio')) fileName += '.mp3';
-        else if (contentType.includes('jpeg') || contentType.includes('jpg')) fileName += '.jpg';
-        else if (contentType.includes('png')) fileName += '.png';
-        else fileName += '.bin';
+      fileName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_').replace(/_+/g, '_');
+      let ext = '';
+      const dotIdx = fileName.lastIndexOf('.');
+      if (dotIdx > 0 && dotIdx >= fileName.length - 8) {
+        ext = fileName.slice(dotIdx).toLowerCase();
+        fileName = fileName.slice(0, dotIdx);
       }
+      if (!ext) {
+        if (contentType.includes('android.package-archive')) ext = '.apk';
+        else if (contentType.includes('zip')) ext = '.zip';
+        else if (contentType.includes('pdf')) ext = '.pdf';
+        else if (contentType.includes('mp4') || contentType.includes('video')) ext = '.mp4';
+        else if (contentType.includes('mpeg') || contentType.includes('audio')) ext = '.mp3';
+        else if (contentType.includes('jpeg') || contentType.includes('jpg')) ext = '.jpg';
+        else if (contentType.includes('png')) ext = '.png';
+        else ext = '.bin';
+      }
+      if (fileName.length > 40) {
+        fileName = `NetPlus_${fileName.slice(0, 18)}_${fileName.slice(-8)}`;
+      }
+      fileName = `${fileName.slice(0, 40)}${ext}`;
 
       res.json({
         ok: true,

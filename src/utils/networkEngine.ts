@@ -216,16 +216,94 @@ export function isNewerVersion(currentVersion: string, remoteVersion: string): b
 }
 
 /**
- * Validates a download URL and extracts a clean file name.
+ * Maps a MIME type to a standard file extension.
+ */
+export function extensionFromMimeType(mimeType?: string): string {
+  const mime = (mimeType || '').toLowerCase();
+  if (mime.includes('android.package-archive')) return '.apk';
+  if (mime.includes('zip')) return '.zip';
+  if (mime.includes('rar')) return '.rar';
+  if (mime.includes('7z')) return '.7z';
+  if (mime.includes('pdf')) return '.pdf';
+  if (mime.includes('mp4') || mime.includes('video')) return '.mp4';
+  if (mime.includes('mpeg') || mime.includes('mp3') || mime.includes('audio')) return '.mp3';
+  if (mime.includes('jpeg') || mime.includes('jpg')) return '.jpg';
+  if (mime.includes('png')) return '.png';
+  if (mime.includes('webp')) return '.webp';
+  if (mime.includes('iso')) return '.iso';
+  return '.bin';
+}
+
+/**
+ * Sanitizes and strictly shortens any candidate filename to <= 55 characters
+ * so Android / Linux filesystems (/storage/emulated/0/Download/) NEVER throw ENAMETOOLONG.
+ */
+export function sanitizeAndShortenFileName(rawName: string, mimeType?: string): string {
+  const cleaned = (rawName || '')
+    .trim()
+    .replace(/["']/g, '')
+    .replace(/[^a-zA-Z0-9._-]/g, '_')
+    .replace(/_+/g, '_');
+
+  const fallbackExt = extensionFromMimeType(mimeType);
+  if (!cleaned) {
+    return `NetPlus_Download${fallbackExt}`;
+  }
+
+  const lastDot = cleaned.lastIndexOf('.');
+  let base = cleaned;
+  let ext = '';
+
+  if (lastDot > 0 && lastDot < cleaned.length - 1) {
+    const candidateExt = cleaned.slice(lastDot);
+    if (/^\.[a-zA-Z0-9]{1,8}$/.test(candidateExt)) {
+      base = cleaned.slice(0, lastDot);
+      ext = candidateExt.toLowerCase();
+    }
+  }
+
+  if (!ext) {
+    ext = fallbackExt;
+  }
+
+  // If the base name looks like a huge signed token (e.g. > 42 chars without readable words), shorten cleanly
+  if (base.length > 42) {
+    const prefix = base.slice(0, 18).replace(/^_+|_+$/g, '');
+    const suffix = base.slice(-8).replace(/^_+|_+$/g, '');
+    base = `NetPlus_${prefix}_${suffix}`;
+  }
+
+  // Strictly cap base length at 42 characters so total filename is always <= 52 chars
+  if (base.length > 42) {
+    base = base.slice(0, 42);
+  }
+
+  return `${base}${ext}`;
+}
+
+/**
+ * Validates a download URL (including extracting URLs from shared text) and extracts a safe, short file name.
  */
 export function validateDownloadUrl(rawUrl: string): {
   valid: boolean;
   error?: string;
   fileName: string;
+  normalizedUrl?: string;
 } {
-  const trimmed = rawUrl.trim();
+  let trimmed = rawUrl.trim();
   if (!trimmed) {
     return { valid: false, error: 'অনুগ্রহ করে একটি বৈধ ডাউনলোড URL দিন (Please enter a URL).', fileName: '' };
+  }
+
+  // If user pasted text containing an http/https link inside it, extract the link
+  const embeddedMatch = trimmed.match(/https?:\/\/[^\s"'<>]+/i);
+  if (embeddedMatch && embeddedMatch[0]) {
+    trimmed = embeddedMatch[0];
+  } else if (!trimmed.startsWith('/') && !/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)) {
+    // If user typed a domain like "example.com/file.apk", prepend https://
+    if (trimmed.includes('.') && !trimmed.includes(' ')) {
+      trimmed = `https://${trimmed}`;
+    }
   }
 
   try {
@@ -239,12 +317,38 @@ export function validateDownloadUrl(rawUrl: string): {
         fileName: '',
       };
     }
+
+    // Check if query params specify a human-readable filename
+    const queryFileName =
+      parsed.searchParams.get('filename') ||
+      parsed.searchParams.get('file') ||
+      parsed.searchParams.get('name') ||
+      parsed.searchParams.get('title') ||
+      parsed.searchParams.get('response-content-disposition');
+
+    if (queryFileName) {
+      const cdMatch = queryFileName.match(/filename\*?=(?:UTF-8'')?["']?([^"';\n]+)["']?/i);
+      const rawCandidate = cdMatch && cdMatch[1] ? cdMatch[1] : queryFileName;
+      return {
+        valid: true,
+        fileName: sanitizeAndShortenFileName(decodeURIComponent(rawCandidate)),
+        normalizedUrl: trimmed,
+      };
+    }
+
     const pathSegments = parsed.pathname.split('/').filter(Boolean);
-    const lastSegment = pathSegments[pathSegments.length - 1] || 'android-package-bundle.apk';
-    const decoded = decodeURIComponent(lastSegment).replace(/[^a-zA-Z0-9._-]/g, '_');
+    const lastSegment = pathSegments[pathSegments.length - 1] || 'NetPlus_Package.apk';
+    let decoded = lastSegment;
+    try {
+      decoded = decodeURIComponent(lastSegment);
+    } catch {
+      decoded = lastSegment;
+    }
+
     return {
       valid: true,
-      fileName: decoded.includes('.') ? decoded : `${decoded}.bin`,
+      fileName: sanitizeAndShortenFileName(decoded),
+      normalizedUrl: trimmed,
     };
   } catch {
     return {

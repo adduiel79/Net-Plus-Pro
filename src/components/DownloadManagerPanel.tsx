@@ -16,6 +16,8 @@ import {
   Layers,
   HardDrive,
   AlertCircle,
+  ClipboardPaste,
+  FolderCheck,
   X,
 } from 'lucide-react';
 import {
@@ -37,12 +39,14 @@ interface BrowserInterceptCandidate {
 
 interface DownloadManagerPanelProps {
   tasks: DownloadTask[];
+  storagePermissionGranted: boolean;
   batteryRestrictionDisabled: boolean;
   unlimitedRetryGlobal: boolean;
   networkConnected: boolean;
   foregroundServiceEnabled: boolean;
   browserInterceptorEnabled: boolean;
   turboBoostEnabled: boolean;
+  onRequestStoragePermission: () => void;
   onToggleBatteryRestriction: () => void;
   onToggleUnlimitedRetry: () => void;
   onToggleNetworkConnection: () => void;
@@ -77,12 +81,14 @@ const REAL_SAMPLE_FILES = [
 
 export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
   tasks,
+  storagePermissionGranted,
   batteryRestrictionDisabled,
   unlimitedRetryGlobal,
   networkConnected,
   foregroundServiceEnabled,
   browserInterceptorEnabled,
   turboBoostEnabled,
+  onRequestStoragePermission,
   onToggleBatteryRestriction,
   onToggleUnlimitedRetry,
   onToggleNetworkConnection,
@@ -111,24 +117,55 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
   // Calculate live comparison between standard 1-stream Chrome and Net Plus Pro Multi-Stream Turbo
   const liveSpeedComparison = calculateTurboSpeedComparison(4.6, threads, turboBoostEnabled);
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const validation = validateDownloadUrl(urlInput);
+  const startOrInterceptUrl = (rawUrl: string) => {
+    const validation = validateDownloadUrl(rawUrl);
     if (!validation.valid) {
       setUrlError(validation.error || 'অবৈধ URL');
       return;
     }
     setUrlError(null);
+    const cleanUrl = validation.normalizedUrl || rawUrl.trim();
 
     if (browserInterceptorEnabled) {
       setInterceptCandidate({
         fileName: validation.fileName,
-        url: urlInput.trim(),
+        url: cleanUrl,
         sourceBrowser: 'Google Chrome',
       });
     } else {
-      onAddDownload(urlInput.trim(), threads, 'Direct Real Download');
+      onAddDownload(cleanUrl, threads, 'Direct Real Download');
       setUrlInput('');
+    }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!urlInput.trim() && typeof navigator !== 'undefined' && navigator.clipboard?.readText) {
+      try {
+        const clipText = await navigator.clipboard.readText();
+        if (clipText && clipText.trim()) {
+          setUrlInput(clipText.trim());
+          startOrInterceptUrl(clipText.trim());
+          return;
+        }
+      } catch {
+        // Clipboard read permission not granted; proceed to normal validation
+      }
+    }
+    startOrInterceptUrl(urlInput);
+  };
+
+  const handlePasteFromClipboard = async () => {
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.readText) {
+      try {
+        const clipText = await navigator.clipboard.readText();
+        if (clipText && clipText.trim()) {
+          setUrlInput(clipText.trim());
+          setUrlError(null);
+        }
+      } catch {
+        setUrlError('ক্লিপবোর্ড থেকে লিংক পেস্ট করতে ইনপুট বক্সে চেপে ধরে Paste করুন।');
+      }
     }
   };
 
@@ -325,48 +362,95 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
         </div>
       </div>
 
-      {/* Android Battery Restriction Bypass Banner */}
-      <div
-        data-testid="battery-restriction-card"
-        className={`mt-4 p-4 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-4 ${
-          batteryRestrictionDisabled
-            ? 'bg-emerald-50/70 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-900/80'
-            : 'bg-amber-50/80 dark:bg-amber-950/40 border-amber-300 dark:border-amber-800/80'
-        }`}
-      >
-        <div className="flex items-start gap-3 min-w-0">
-          {batteryRestrictionDisabled ? (
-            <Zap className="w-5 h-5 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
-          ) : (
-            <ShieldAlert className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
-          )}
-          <div className="min-w-0 break-words">
-            <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-              {batteryRestrictionDisabled
-                ? 'Android ব্যাটারি রেস্ট্রিকশন ডিসএবল করা আছে — ইনস্ট্যান্ট ডাউনলোড সক্রিয় (0ms Delay)'
-                : 'Android ব্যাটারি নীতির কারণে ব্যাকগ্রাউন্ড ডাউনলোড দেরিতে শুরু হতে পারে'}
-            </div>
-            <p className="text-xs text-slate-600 dark:text-slate-300 mt-0.5 leading-relaxed">
-              {batteryRestrictionDisabled
-                ? 'Unrestricted ব্যাটারি মোড চালু রয়েছে। যেকোনো লিংক দিলেই 0ms লেটেন্সিতে ইনস্ট্যান্ট রিয়েল ডাউনলোড শুরু হবে এবং ফোনের Download ফোল্ডারে সেভ হবে।'
-                : 'ব্যাটারি রেস্ট্রিকশন চালু থাকলে Android Doze নীতির কারণে ডাউনলোড শুরু হতে ৪–১৫ সেকেন্ড দেরি হতে পারে। ডিসএবল করলে ডাউনলোড ইনস্ট্যান্ট শুরু হবে।'}
-            </p>
-          </div>
-        </div>
-
-        <button
-          type="button"
-          onClick={onToggleBatteryRestriction}
-          className={`px-4 py-2.5 min-h-[42px] rounded-xl text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
-            batteryRestrictionDisabled
-              ? 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800'
-              : 'bg-amber-600 hover:bg-amber-700 text-white'
+      {/* Android Internal Storage Permission + Battery Restriction Cards */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 mt-4">
+        {/* Card 1: Android Internal Storage Permission (All Files Access / WRITE_EXTERNAL_STORAGE) */}
+        <div
+          data-testid="storage-permission-card"
+          className={`lg:col-span-6 p-4 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-4 ${
+            storagePermissionGranted
+              ? 'bg-emerald-50/70 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-900/80'
+              : 'bg-blue-50/80 dark:bg-blue-950/40 border-blue-300 dark:border-blue-800/80'
           }`}
         >
-          {batteryRestrictionDisabled
-            ? 'রেস্ট্রিকশন পুনরায় টেস্ট করুন'
-            : 'ব্যাটারি রেস্ট্রিকশন ডিসএবল করুন (Instant)'}
-        </button>
+          <div className="flex items-start gap-3 min-w-0">
+            {storagePermissionGranted ? (
+              <FolderCheck className="w-5 h-5 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+            ) : (
+              <HardDrive className="w-5 h-5 text-blue-600 dark:text-blue-400 shrink-0 mt-0.5" />
+            )}
+            <div className="min-w-0 break-words">
+              <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                {storagePermissionGranted
+                  ? 'ফোনের Internal Storage পারমিশন দেওয়া আছে (Download ফোল্ডার সক্রিয়)'
+                  : 'ফোনের Internal Storage পারমিশন (All Files Access)'}
+              </div>
+              <p className="text-xs text-slate-600 dark:text-slate-300 mt-0.5 leading-relaxed">
+                {storagePermissionGranted
+                  ? 'যেকোনো লিংকের ফাইল সরাসরি আপনার ফোনের /storage/emulated/0/Download/ ফোল্ডারে বাধাহীনভাবে সেভ হবে।'
+                  : 'ফোনের মেমোরি বা Internal Storage (Download ফোল্ডার)-এ সরাসরি বড় ফাইল সেভ করার জন্য স্টোরেজ পারমিশন চালু করুন।'}
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={onRequestStoragePermission}
+            className={`px-4 py-2.5 min-h-[42px] rounded-xl text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+              storagePermissionGranted
+                ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                : 'bg-blue-600 hover:bg-blue-700 text-white'
+            }`}
+          >
+            {storagePermissionGranted
+              ? 'স্টোরেজ পারমিশন সক্রিয় (সেটিংস)'
+              : 'স্টোরেজ পারমিশন দিন (Allow Storage)'}
+          </button>
+        </div>
+
+        {/* Card 2: Android Battery Restriction Bypass */}
+        <div
+          data-testid="battery-restriction-card"
+          className={`lg:col-span-6 p-4 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-4 ${
+            batteryRestrictionDisabled
+              ? 'bg-emerald-50/70 dark:bg-emerald-950/30 border-emerald-200 dark:border-emerald-900/80'
+              : 'bg-amber-50/80 dark:bg-amber-950/40 border-amber-300 dark:border-amber-800/80'
+          }`}
+        >
+          <div className="flex items-start gap-3 min-w-0">
+            {batteryRestrictionDisabled ? (
+              <Zap className="w-5 h-5 text-emerald-600 dark:text-emerald-400 shrink-0 mt-0.5" />
+            ) : (
+              <ShieldAlert className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+            )}
+            <div className="min-w-0 break-words">
+              <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                {batteryRestrictionDisabled
+                  ? 'ব্যাটারি রেস্ট্রিকশন ডিসএবল করা আছে — ইনস্ট্যান্ট স্টার্ট (0ms)'
+                  : 'Android ব্যাটারি নীতির কারণে ডাউনলোড দেরিতে শুরু হতে পারে'}
+              </div>
+              <p className="text-xs text-slate-600 dark:text-slate-300 mt-0.5 leading-relaxed">
+                {batteryRestrictionDisabled
+                  ? 'Unrestricted ব্যাটারি মোড চালু রয়েছে। যেকোনো লিংক দিলেই 0ms লেটেন্সিতে ইনস্ট্যান্ট রিয়েল ডাউনলোড শুরু হবে।'
+                  : 'ব্যাটারি রেস্ট্রিকশন চালু থাকলে ডাউনলোড শুরু হতে দেরি হতে পারে। ডিসএবল করলে ডাউনলোড ইনস্ট্যান্ট শুরু হবে।'}
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={onToggleBatteryRestriction}
+            className={`px-4 py-2.5 min-h-[42px] rounded-xl text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+              batteryRestrictionDisabled
+                ? 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800'
+                : 'bg-amber-600 hover:bg-amber-700 text-white'
+            }`}
+          >
+            {batteryRestrictionDisabled
+              ? 'ব্যাটারি মোড: Instant (0ms)'
+              : 'ব্যাটারি রেস্ট্রিকশন ডিসএবল করুন'}
+          </button>
+        </div>
       </div>
 
       {/* Add New Real Download Form */}
@@ -376,17 +460,27 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
             <label htmlFor="download-url-input" className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
               যেকোনো সরাসরি ফাইল ডাউনলোড লিংক দিন (ফোনের Internal Storage / Download ফোল্ডারে সেভ হবে)
             </label>
-            <input
-              id="download-url-input"
-              type="url"
-              value={urlInput}
-              onChange={(e) => {
-                setUrlInput(e.target.value);
-                if (urlError) setUrlError(null);
-              }}
-              placeholder="https://example.com/file.apk অথবা নিচের রিয়েল টেস্ট ফাইলে ক্লিক করুন"
-              className="w-full px-3.5 py-2.5 rounded-xl text-xs bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-600"
-            />
+            <div className="flex items-center gap-2">
+              <input
+                id="download-url-input"
+                type="url"
+                value={urlInput}
+                onChange={(e) => {
+                  setUrlInput(e.target.value);
+                  if (urlError) setUrlError(null);
+                }}
+                placeholder="https://example.com/file.apk অথবা নিচের রিয়েল টেস্ট ফাইলে ক্লিক করুন"
+                className="flex-1 min-w-0 px-3.5 py-2.5 rounded-xl text-xs bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-600"
+              />
+              <button
+                type="button"
+                onClick={handlePasteFromClipboard}
+                className="inline-flex items-center gap-1.5 px-3 py-2.5 min-h-[40px] rounded-xl text-xs font-semibold bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 border border-slate-200 dark:border-slate-700 transition-colors cursor-pointer shrink-0"
+              >
+                <ClipboardPaste className="w-3.5 h-3.5" />
+                <span>পেস্ট</span>
+              </button>
+            </div>
           </div>
 
           <div className="md:col-span-2">
@@ -516,7 +610,7 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
                     </div>
 
                     {/* Metadata */}
-                    <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
+                    <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500 dark:text-slate-400 break-words">
                       <span className="font-mono tabular-nums">
                         {formatBytes(task.downloadedBytes)} /{' '}
                         {task.totalBytes > 0 ? formatBytes(task.totalBytes) : 'সাইজ নির্ণয় হচ্ছে...'}{' '}
@@ -554,7 +648,7 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
                       {task.savedPath && (
                         <>
                           <span aria-hidden="true">·</span>
-                          <span className="font-mono text-emerald-700 dark:text-emerald-400">
+                          <span className="font-mono text-emerald-700 dark:text-emerald-400 break-all">
                             ফোল্ডার: {task.savedPath}
                           </span>
                         </>

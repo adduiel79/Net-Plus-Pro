@@ -18,6 +18,9 @@ import {
   startRealMultiThreadDownload,
   setRealDownloadPaused,
   cancelRealDownload,
+  checkNativeStoragePermission,
+  requestNativeStoragePermission,
+  requestNativeBatteryBypass,
 } from './utils/realDownloader';
 import { SpeedTestPanel } from './components/SpeedTestPanel';
 import { DownloadManagerPanel } from './components/DownloadManagerPanel';
@@ -55,7 +58,10 @@ export default function App() {
     'all' | 'speedtest' | 'downloads' | 'service' | 'developer'
   >('all');
 
-  // Core Android & Network States (batteryRestrictionDisabled = true by default for 0ms Instant Start)
+  // Core Android & Network States
+  const [storagePermissionGranted, setStoragePermissionGranted] = useState<boolean>(() =>
+    checkNativeStoragePermission()
+  );
   const [batteryRestrictionDisabled, setBatteryRestrictionDisabled] = useState<boolean>(true);
   const [unlimitedRetryGlobal, setUnlimitedRetryGlobal] = useState<boolean>(true);
   const [networkConnected, setNetworkConnected] = useState<boolean>(true);
@@ -89,8 +95,8 @@ export default function App() {
     {
       id: 'log-2',
       time: '১০:৪৪:০২',
-      event: 'BROWSER_INTERCEPTOR',
-      detail: 'Chrome ও সকল ব্রাউজার ডাউনলোড লিংক অটো-অপশন (Intent.ACTION_VIEW) সক্রিয়',
+      event: 'STORAGE_ENGINE',
+      detail: 'দীর্ঘ ফাইলের নাম সংক্ষিপ্তকরণ (ENAMETOOLONG ফিক্স) ও স্টোরেজ পারমিশন ম্যানেজার সক্রিয়',
     },
     {
       id: 'log-3',
@@ -110,9 +116,9 @@ export default function App() {
     mandatory: false,
     changelog: [
       'যেকোনো লিংকে ক্লিক করলে ফোনের Internal Storage (Download ফোল্ডার)-এ ১৬–৩২ থ্রেডে রিয়েল হাই-স্পিড ডাউনলোড',
-      'Chrome বা অন্য যেকোনো ব্রাউজারে ডাউনলোড ক্লিক করলে Net Plus Pro অটো-অপশন পপআপ',
+      'অ্যাপ থেকে ১-ক্লিকে Android Storage Permission (All Files Access) চালু করার অপশন যুক্ত',
+      'বড় ডাউনলোড লিংকের ফাইলের নাম অটো-সংক্ষিপ্ত করে ENAMETOOLONG এরর স্থায়ীভাবে সমাধান',
       'Upload Speed, Download Speed (MB/s), Ping ও Jitter-সহ ১ সেকেন্ডে রিয়েল Speed Test',
-      'ডাউনলোড Retry Limit তুলে দিয়ে ∞ Unlimited Auto-Retry এবং 0ms ইনস্ট্যান্ট স্টার্ট',
     ],
   });
 
@@ -158,30 +164,35 @@ export default function App() {
                       ...t,
                       fileName: fileName || t.fileName,
                       totalBytes: totalBytes > 0 ? totalBytes : t.totalBytes,
+                      savedPath: `/storage/emulated/0/Download/${fileName || t.fileName}`,
                     }
                   : t
               )
             );
           },
           onProgress: ({
+            fileName,
             downloadedBytes,
             totalBytes,
             speedMBps,
             etaSeconds,
             chunkProgress,
             retryCount,
+            savedPath,
           }) => {
             setDownloads((prev) =>
               prev.map((t) =>
                 t.id === taskId
                   ? {
                       ...t,
+                      fileName: fileName || t.fileName,
                       downloadedBytes,
                       totalBytes: totalBytes > 0 ? totalBytes : t.totalBytes,
                       speedMBps,
                       etaSeconds,
                       chunkProgress,
                       retryCount,
+                      savedPath: savedPath || t.savedPath,
                       status: t.status === 'paused' ? 'paused' : 'downloading',
                     }
                   : t
@@ -243,7 +254,8 @@ export default function App() {
 
   const handleAddDownload = useCallback(
     (url: string, threads: number, sourceBrowser = 'Google Chrome') => {
-      const { fileName } = validateDownloadUrl(url);
+      const { fileName, normalizedUrl } = validateDownloadUrl(url);
+      const cleanUrl = normalizedUrl || url.trim();
       const delayMs = computeDownloadStartDelayMs(
         batteryRestrictionDisabled,
         serviceConfig.foregroundServiceEnabled
@@ -254,7 +266,7 @@ export default function App() {
       const newTask: DownloadTask = {
         id: taskId,
         fileName,
-        url,
+        url: cleanUrl,
         totalBytes: 0,
         downloadedBytes: 0,
         speedMBps: 0,
@@ -285,7 +297,7 @@ export default function App() {
       );
 
       if (batteryRestrictionDisabled && networkConnected) {
-        executeRealDownloadForTask(taskId, url, threads, unlimitedRetryGlobal);
+        executeRealDownloadForTask(taskId, cleanUrl, threads, unlimitedRetryGlobal);
       } else if (!batteryRestrictionDisabled) {
         window.setTimeout(() => {
           setDownloads((curr) =>
@@ -295,7 +307,7 @@ export default function App() {
                 : t
             )
           );
-          executeRealDownloadForTask(taskId, url, threads, unlimitedRetryGlobal);
+          executeRealDownloadForTask(taskId, cleanUrl, threads, unlimitedRetryGlobal);
         }, 4200);
       }
     },
@@ -310,8 +322,18 @@ export default function App() {
     ]
   );
 
-  // Listen for incoming browser links intercepted from Chrome on Android APK
+  // Listen for incoming browser links and storage permission changes on Android APK
   useEffect(() => {
+    window.__onStoragePermissionChanged = (granted: boolean) => {
+      setStoragePermissionGranted(Boolean(granted));
+      if (granted) {
+        appendNetworkLog(
+          'STORAGE_PERMISSION',
+          'ফোনের Internal Storage (All Files Access) পারমিশন সফলভাবে চালু হয়েছে'
+        );
+      }
+    };
+
     window.__onBrowserDownloadIntercepted = (interceptedUrl: string) => {
       if (interceptedUrl) {
         setActiveSection('downloads');
@@ -326,9 +348,21 @@ export default function App() {
         handleAddDownload(pending, 16, 'Google Chrome (Auto-Intercepted)');
       }
     }
-  }, [handleAddDownload]);
+  }, [handleAddDownload, appendNetworkLog]);
+
+  const handleRequestStoragePermission = () => {
+    const openedNative = requestNativeStoragePermission();
+    setStoragePermissionGranted(true);
+    appendNetworkLog(
+      'STORAGE_PERMISSION',
+      openedNative
+        ? 'Android Internal Storage পারমিশন সেটিংস ওপেন করা হয়েছে'
+        : 'ফোনের Internal Storage (Download ফোল্ডার) পারমিশন সক্রিয় করা হয়েছে'
+    );
+  };
 
   const handleToggleBatteryRestriction = () => {
+    requestNativeBatteryBypass();
     setBatteryRestrictionDisabled((prev) => {
       const next = !prev;
       if (next) {
@@ -683,12 +717,14 @@ export default function App() {
         {(activeSection === 'all' || activeSection === 'downloads') && (
           <DownloadManagerPanel
             tasks={downloads}
+            storagePermissionGranted={storagePermissionGranted}
             batteryRestrictionDisabled={batteryRestrictionDisabled}
             unlimitedRetryGlobal={unlimitedRetryGlobal}
             networkConnected={networkConnected}
             foregroundServiceEnabled={serviceConfig.foregroundServiceEnabled}
             browserInterceptorEnabled={browserInterceptorEnabled}
             turboBoostEnabled={turboBoostEnabled}
+            onRequestStoragePermission={handleRequestStoragePermission}
             onToggleBatteryRestriction={handleToggleBatteryRestriction}
             onToggleUnlimitedRetry={handleToggleUnlimitedRetry}
             onToggleNetworkConnection={handleToggleNetworkConnection}
