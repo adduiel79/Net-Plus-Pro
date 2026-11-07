@@ -1,0 +1,6 @@
+{
+  "name": "NetPulse Pro — Android Download & Speed Test Suite",
+  "description": "Full-featured Android Download Manager & Network Suite with Ping, Jitter, Download & Upload Speed Test, Unlimited Retry, Instant Battery-Bypass Download, Real-Time Network State Service, Dark Mode, and Auto-Update.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
