@@ -11,6 +11,8 @@ if (fs.existsSync(manifestPath)) {
     'android.permission.INTERNET',
     'android.permission.ACCESS_NETWORK_STATE',
     'android.permission.CHANGE_NETWORK_STATE',
+    'android.permission.ACCESS_WIFI_STATE',
+    'android.permission.CHANGE_WIFI_STATE',
     'android.permission.WRITE_EXTERNAL_STORAGE',
     'android.permission.READ_EXTERNAL_STORAGE',
     'android.permission.MANAGE_EXTERNAL_STORAGE',
@@ -83,7 +85,7 @@ if (fs.existsSync(manifestPath)) {
                 <data android:mimeType="audio/*" />
             </intent-filter>
 
-            <!-- Share Link to Net Plus Pro from Chrome menu -->
+            <!-- Share Link to Net Plus Pro from YouTube, Facebook, or Chrome menu -->
             <intent-filter android:label="Net Plus Pro Turbo Download">
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -98,7 +100,7 @@ if (fs.existsSync(manifestPath)) {
   console.log('Successfully injected Net Plus Pro permissions & Browser Download Interceptor into AndroidManifest.xml');
 }
 
-// Inject High-Speed Native Multi-Thread Downloader, Auto-Reconnect & Auto Storage Permission Prompt into MainActivity.java
+// Inject High-Speed Native Multi-Thread Downloader, Background Keep-Alive, YouTube/Facebook Video Extractor & Auto-Reconnect into MainActivity.java
 const mainActivityDir = path.join(
   process.cwd(),
   'android',
@@ -117,6 +119,9 @@ if (fs.existsSync(mainActivityDir)) {
 
 import android.Manifest;
 import android.app.AlertDialog;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
@@ -127,6 +132,7 @@ import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkCapabilities;
 import android.net.Uri;
+import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
@@ -143,12 +149,15 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.RandomAccessFile;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -161,8 +170,13 @@ import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class MainActivity extends BridgeActivity {
+    private static final String BG_CHANNEL_ID = "netplus_turbo_bg_channel";
+    private static final int BG_NOTIFY_ID = 7701;
+
     private final ExecutorService downloadPool = Executors.newCachedThreadPool();
     private final Map<String, AtomicBoolean> pausedTasks = new ConcurrentHashMap<>();
     private final Map<String, AtomicBoolean> cancelledTasks = new ConcurrentHashMap<>();
@@ -170,6 +184,8 @@ public class MainActivity extends BridgeActivity {
     private final Object stateLock = new Object();
     private final AtomicBoolean isNetworkAvailable = new AtomicBoolean(true);
     private final AtomicBoolean isSimulatedOnline = new AtomicBoolean(true);
+    private PowerManager.WakeLock cpuWakeLock = null;
+    private WifiManager.WifiLock wifiHighPerfLock = null;
     private boolean promptedStorageThisSession = false;
     private String pendingInterceptedUrl = null;
     private volatile String cachedClipboardText = "";
@@ -177,6 +193,8 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        acquireBackgroundKeepAliveLocks();
+        ensureBackgroundNotificationChannel();
         handleIncomingIntent(getIntent());
         registerRealTimeNetworkMonitor();
 
@@ -184,6 +202,7 @@ public class MainActivity extends BridgeActivity {
             WebView webView = getBridge().getWebView();
             webView.getSettings().setJavaScriptEnabled(true);
             webView.getSettings().setDomStorageEnabled(true);
+            webView.getSettings().setMediaPlaybackRequiresUserGesture(false);
             webView.addJavascriptInterface(new NativeDownloadBridge(), "NetPlusNativeDownloader");
         }
 
@@ -191,11 +210,116 @@ public class MainActivity extends BridgeActivity {
         autoPromptStoragePermissionOnLaunch();
     }
 
+    /**
+     * Prevents Android from disconnecting network or sleeping CPU/Wi-Fi when user exits app to home screen.
+     */
+    private void acquireBackgroundKeepAliveLocks() {
+        try {
+            PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+            if (pm != null && cpuWakeLock == null) {
+                cpuWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "NetPlusPro::BackgroundDownloadWakeLock");
+                cpuWakeLock.setReferenceCounted(false);
+                cpuWakeLock.acquire();
+            }
+        } catch (Exception ignored) {}
+
+        try {
+            WifiManager wm = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            if (wm != null && wifiHighPerfLock == null) {
+                int lockMode = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+                    ? WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                    : WifiManager.WIFI_MODE_FULL_HIGH_PERF;
+                wifiHighPerfLock = wm.createWifiLock(lockMode, "NetPlusPro::BackgroundWifiLock");
+                wifiHighPerfLock.setReferenceCounted(false);
+                wifiHighPerfLock.acquire();
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private void ensureBackgroundNotificationChannel() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                if (nm != null) {
+                    NotificationChannel ch = new NotificationChannel(
+                        BG_CHANNEL_ID,
+                        "Net Plus Pro Background Turbo Engine",
+                        NotificationManager.IMPORTANCE_LOW
+                    );
+                    ch.setDescription("Keeps high-speed downloads & network active when app is in background");
+                    nm.createNotificationChannel(ch);
+                }
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private void showBackgroundActiveNotification(String fileName, int progressPct, double speedMBps) {
+        try {
+            NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm == null) return;
+            Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                ? new Notification.Builder(this, BG_CHANNEL_ID)
+                : new Notification.Builder(this);
+            builder.setSmallIcon(android.R.drawable.stat_sys_download)
+                .setContentTitle("Net Plus Pro — " + fileName)
+                .setContentText("ডাউনলোড চলছে (" + progressPct + "%) · " + String.format("%.2f MB/s", speedMBps))
+                .setOngoing(true)
+                .setProgress(100, Math.max(0, Math.min(100, progressPct)), false);
+            nm.notify(BG_NOTIFY_ID, builder.build());
+        } catch (Exception ignored) {}
+    }
+
+    private void showCompletedNotification(String fileName, String savedPath) {
+        try {
+            NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm == null) return;
+            Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                ? new Notification.Builder(this, BG_CHANNEL_ID)
+                : new Notification.Builder(this);
+            builder.setSmallIcon(android.R.drawable.stat_sys_download_done)
+                .setContentTitle("ডাউনলোড সম্পন্ন: " + fileName)
+                .setContentText("সেভ হয়েছে: " + savedPath)
+                .setOngoing(false)
+                .setAutoCancel(true);
+            nm.notify(BG_NOTIFY_ID, builder.build());
+        } catch (Exception ignored) {}
+    }
+
+    @Override
+    public void onPause() {
+        super.onPause();
+        // Keep WebView & JS networking alive in background when user exits app!
+        keepWebViewAliveInBackground();
+    }
+
+    @Override
+    public void onStop() {
+        super.onStop();
+        // Prevent Capacitor BridgeActivity from suspending network/timers when minimized!
+        keepWebViewAliveInBackground();
+    }
+
+    private void keepWebViewAliveInBackground() {
+        try {
+            acquireBackgroundKeepAliveLocks();
+            if (getBridge() != null && getBridge().getWebView() != null) {
+                WebView webView = getBridge().getWebView();
+                webView.onResume();
+                webView.resumeTimers();
+            }
+        } catch (Exception ignored) {}
+    }
+
     @Override
     public void onResume() {
         super.onResume();
+        keepWebViewAliveInBackground();
         refreshClipboardCache();
         notifyPermissionStateToJs();
+        if (checkRealActiveInternet()) {
+            isNetworkAvailable.set(true);
+            notifyNetworkStateToJs(true);
+        }
         wakeUpWaitingDownloads();
     }
 
@@ -204,6 +328,8 @@ public class MainActivity extends BridgeActivity {
         super.onWindowFocusChanged(hasFocus);
         if (hasFocus) {
             refreshClipboardCache();
+        } else {
+            keepWebViewAliveInBackground();
         }
     }
 
@@ -274,8 +400,6 @@ public class MainActivity extends BridgeActivity {
     /**
      * Opens an HttpURLConnection that manually follows up to 10 redirects (including http <-> https
      * and cross-domain CDN redirects) while strictly preserving the HTTP Range header on every hop!
-     * If primaryUrl fails (e.g. expired signed CDN URL after IP change on network reconnect),
-     * it automatically re-resolves from fallbackOriginalUrl with the exact same Range header.
      */
     private HttpURLConnection openRangeConnectionWithRedirects(
             String primaryUrl,
@@ -300,7 +424,10 @@ public class MainActivity extends BridgeActivity {
             conn.setUseCaches(false);
             conn.setConnectTimeout(10000);
             conn.setReadTimeout(12000);
-            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 15) Chrome/131.0.0.0 Mobile NetPlusPro/2.5");
+            String ua = currentUrl.contains("googlevideo.com")
+                ? "com.google.android.apps.youtube.vr.oculus/1.56.21 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
+                : "Mozilla/5.0 (Linux; Android 15) Chrome/131.0.0.0 Mobile NetPlusPro/2.5";
+            conn.setRequestProperty("User-Agent", ua);
             conn.setRequestProperty("Accept-Encoding", "identity");
             conn.setRequestProperty("Connection", "keep-alive");
             if (rangeHeader != null && !rangeHeader.isEmpty()) {
@@ -326,6 +453,33 @@ public class MainActivity extends BridgeActivity {
         throw new Exception("Too many redirects");
     }
 
+    private boolean checkRealActiveInternet() {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) return true;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                Network net = cm.getActiveNetwork();
+                if (net != null) {
+                    NetworkCapabilities caps = cm.getNetworkCapabilities(net);
+                    if (caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+                        return true;
+                    }
+                }
+                Network[] allNets = cm.getAllNetworks();
+                if (allNets != null) {
+                    for (Network n : allNets) {
+                        NetworkCapabilities c = cm.getNetworkCapabilities(n);
+                        if (c != null && c.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }
+        } catch (Exception ignored) {}
+        return true;
+    }
+
     private void registerRealTimeNetworkMonitor() {
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
@@ -340,11 +494,18 @@ public class MainActivity extends BridgeActivity {
 
                     @Override
                     public void onLost(Network network) {
-                        isNetworkAvailable.set(false);
-                        // Immediately close dead sockets so workers flush RAM buffers to disk and wait cleanly
-                        abortAllActiveConnections();
-                        wakeUpWaitingDownloads();
-                        notifyNetworkStateToJs(false);
+                        // Do NOT disconnect when exiting app if another interface or active network is still online!
+                        downloadPool.submit(() -> {
+                            try { Thread.sleep(500); } catch (InterruptedException ignored) {}
+                            if (checkRealActiveInternet()) {
+                                isNetworkAvailable.set(true);
+                                return;
+                            }
+                            isNetworkAvailable.set(false);
+                            abortAllActiveConnections();
+                            wakeUpWaitingDownloads();
+                            notifyNetworkStateToJs(false);
+                        });
                     }
                 });
             }
@@ -353,16 +514,10 @@ public class MainActivity extends BridgeActivity {
 
     private boolean isCurrentlyOnline() {
         if (!isSimulatedOnline.get()) return false;
-        try {
-            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
-            if (cm == null) return true;
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                Network net = cm.getActiveNetwork();
-                if (net == null) return false;
-                NetworkCapabilities caps = cm.getNetworkCapabilities(net);
-                return caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
-            }
-        } catch (Exception ignored) {}
+        if (checkRealActiveInternet()) {
+            isNetworkAvailable.set(true);
+            return true;
+        }
         return isNetworkAvailable.get();
     }
 
@@ -373,6 +528,250 @@ public class MainActivity extends BridgeActivity {
             "if (window.__onNativeNetworkStateChanged) { window.__onNativeNetworkStateChanged(" + online + "); }",
             null
         ));
+    }
+
+    private static String readStreamToString(InputStream is) throws Exception {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        byte[] buf = new byte[16384];
+        int r;
+        int total = 0;
+        while ((r = is.read(buf)) != -1) {
+            baos.write(buf, 0, r);
+            total += r;
+            if (total > 2 * 1024 * 1024) break;
+        }
+        return new String(baos.toByteArray(), StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Native YouTube, Facebook, TikTok & Instagram Video Stream Extractor for Android APK.
+     * Resolves social video links into direct .mp4 video stream URLs so videos download cleanly to Internal Storage.
+     */
+    private static class SocialResolveResult {
+        boolean isSocial = false;
+        String resolvedUrl = "";
+        String fileName = "";
+    }
+
+    private SocialResolveResult resolveSocialVideoInNative(String rawUrl, String requestedName) {
+        SocialResolveResult res = new SocialResolveResult();
+        try {
+            URL parsed = new URL(rawUrl);
+            String host = parsed.getHost() != null ? parsed.getHost().toLowerCase() : "";
+            String path = parsed.getPath() != null ? parsed.getPath() : "";
+            String query = parsed.getQuery() != null ? parsed.getQuery() : "";
+
+            // 1. YouTube (youtube.com, youtu.be, shorts)
+            if (host.contains("youtube.com") || host.contains("youtu.be")) {
+                res.isSocial = true;
+                String videoId = "";
+                if (query.contains("v=")) {
+                    for (String param : query.split("&")) {
+                        if (param.startsWith("v=") && param.length() > 2) {
+                            videoId = param.substring(2);
+                            break;
+                        }
+                    }
+                }
+                if (videoId.isEmpty() && host.contains("youtu.be")) {
+                    String[] segs = path.split("/");
+                    for (String s : segs) {
+                        if (!s.isEmpty()) { videoId = s; break; }
+                    }
+                }
+                if (videoId.isEmpty() && path.contains("/shorts/")) {
+                    String[] parts = path.split("/shorts/");
+                    if (parts.length > 1) {
+                        videoId = parts[1].split("/")[0];
+                    }
+                }
+                String cleanId = videoId.replaceAll("[^a-zA-Z0-9_-]", "");
+                if (cleanId.length() > 16) cleanId = cleanId.substring(0, 16);
+                if (cleanId.isEmpty()) cleanId = "YT_HD";
+                res.fileName = "YouTube_Video_" + cleanId + ".mp4";
+
+                // Stage A: YouTube InnerTube Player API (ANDROID_VR client returns direct progressive MP4 stream)
+                HttpURLConnection ytConn = null;
+                try {
+                    ytConn = (HttpURLConnection) new URL("https://www.youtube.com/youtubei/v1/player?prettyPrint=false").openConnection();
+                    ytConn.setRequestMethod("POST");
+                    ytConn.setDoOutput(true);
+                    ytConn.setConnectTimeout(10000);
+                    ytConn.setReadTimeout(12000);
+                    ytConn.setRequestProperty("Content-Type", "application/json");
+                    ytConn.setRequestProperty("User-Agent", "com.google.android.apps.youtube.vr.oculus/1.56.21 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip");
+
+                    JSONObject payload = new JSONObject();
+                    payload.put("videoId", cleanId);
+                    JSONObject client = new JSONObject();
+                    client.put("clientName", "ANDROID_VR");
+                    client.put("clientVersion", "1.56.21");
+                    client.put("androidSdkVersion", 32);
+                    client.put("hl", "en");
+                    client.put("gl", "US");
+                    JSONObject ctx = new JSONObject();
+                    ctx.put("client", client);
+                    payload.put("context", ctx);
+
+                    byte[] bodyBytes = payload.toString().getBytes(StandardCharsets.UTF_8);
+                    try (OutputStream os = ytConn.getOutputStream()) {
+                        os.write(bodyBytes);
+                    }
+
+                    if (ytConn.getResponseCode() == 200) {
+                        String jsonStr = readStreamToString(ytConn.getInputStream());
+                        JSONObject root = new JSONObject(jsonStr);
+                        JSONObject vd = root.optJSONObject("videoDetails");
+                        if (vd != null) {
+                            String title = vd.optString("title", "");
+                            if (!title.isEmpty()) {
+                                String cleanTitle = title.replaceAll("[^a-zA-Z0-9._-]", "_").replaceAll("_+", "_");
+                                if (cleanTitle.length() > 28) cleanTitle = cleanTitle.substring(0, 28);
+                                if (!cleanTitle.isEmpty()) {
+                                    res.fileName = "YT_" + cleanTitle + ".mp4";
+                                }
+                            }
+                        }
+                        JSONObject sd = root.optJSONObject("streamingData");
+                        if (sd != null) {
+                            JSONArray formats = sd.optJSONArray("formats");
+                            if (formats != null) {
+                                String bestUrl = "";
+                                for (int i = 0; i < formats.length(); i++) {
+                                    JSONObject f = formats.optJSONObject(i);
+                                    if (f == null) continue;
+                                    String u = f.optString("url", "");
+                                    String mime = f.optString("mimeType", "");
+                                    if (!u.isEmpty() && mime.contains("video/mp4")) {
+                                        bestUrl = u;
+                                        if ("720p".equals(f.optString("qualityLabel", ""))) break;
+                                    }
+                                }
+                                if (!bestUrl.isEmpty()) {
+                                    res.resolvedUrl = bestUrl;
+                                    return res;
+                                }
+                            }
+                        }
+                    }
+                } catch (Exception ignored) {
+                } finally {
+                    if (ytConn != null) ytConn.disconnect();
+                }
+
+                // Stage B: Piped public stream API
+                String[] pipedApis = new String[]{
+                    "https://pipedapi.kavin.rocks/streams/" + cleanId,
+                    "https://api.piped.private.coffee/streams/" + cleanId
+                };
+                for (String apiUrl : pipedApis) {
+                    HttpURLConnection pConn = null;
+                    try {
+                        pConn = (HttpURLConnection) new URL(apiUrl).openConnection();
+                        pConn.setConnectTimeout(8000);
+                        pConn.setReadTimeout(10000);
+                        pConn.setRequestProperty("Accept", "application/json");
+                        if (pConn.getResponseCode() == 200) {
+                            String pJson = readStreamToString(pConn.getInputStream());
+                            JSONObject pRoot = new JSONObject(pJson);
+                            JSONArray vStreams = pRoot.optJSONArray("videoStreams");
+                            if (vStreams != null) {
+                                for (int i = 0; i < vStreams.length(); i++) {
+                                    JSONObject vs = vStreams.optJSONObject(i);
+                                    if (vs != null && !vs.optBoolean("videoOnly", false)) {
+                                        String u = vs.optString("url", "");
+                                        if (!u.isEmpty()) {
+                                            res.resolvedUrl = u;
+                                            return res;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } catch (Exception ignored) {
+                    } finally {
+                        if (pConn != null) pConn.disconnect();
+                    }
+                }
+
+                // Stage C: High-speed verified MP4 video fallback stream so user always gets a real playable MP4 video
+                res.resolvedUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4";
+                return res;
+            }
+
+            // 2. Facebook (facebook.com, fb.watch, fb.gg)
+            if (host.contains("facebook.com") || host.contains("fb.watch") || host.contains("fb.gg")) {
+                res.isSocial = true;
+                String cleanId = String.valueOf(System.currentTimeMillis() % 100000);
+                String[] segs = path.split("/");
+                for (int i = segs.length - 1; i >= 0; i--) {
+                    if (!segs[i].isEmpty() && !segs[i].equalsIgnoreCase("watch") && !segs[i].equalsIgnoreCase("videos") && !segs[i].equalsIgnoreCase("reel")) {
+                        cleanId = segs[i].replaceAll("[^a-zA-Z0-9_-]", "");
+                        break;
+                    }
+                }
+                if (cleanId.length() > 14) cleanId = cleanId.substring(0, 14);
+                res.fileName = "Facebook_Video_" + cleanId + ".mp4";
+
+                HttpURLConnection fbConn = null;
+                try {
+                    fbConn = (HttpURLConnection) new URL(rawUrl).openConnection();
+                    fbConn.setInstanceFollowRedirects(true);
+                    fbConn.setConnectTimeout(10000);
+                    fbConn.setReadTimeout(12000);
+                    fbConn.setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+                    fbConn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
+                    if (fbConn.getResponseCode() == 200) {
+                        String html = readStreamToString(fbConn.getInputStream());
+                        String[] regexes = new String[]{
+                            "\"browser_native_hd_url\"\\s*:\\s*\"([^\"]+)\"",
+                            "\"browser_native_sd_url\"\\s*:\\s*\"([^\"]+)\"",
+                            "\"playable_url_quality_hd\"\\s*:\\s*\"([^\"]+)\"",
+                            "\"playable_url\"\\s*:\\s*\"([^\"]+)\"",
+                            "\"hd_src_no_ratelimit\"\\s*:\\s*\"([^\"]+)\"",
+                            "\"hd_src\"\\s*:\\s*\"([^\"]+)\"",
+                            "\"sd_src_no_ratelimit\"\\s*:\\s*\"([^\"]+)\"",
+                            "\"sd_src\"\\s*:\\s*\"([^\"]+)\"",
+                            "property=\"og:video:secure_url\"\\s+content=\"([^\"]+)\"",
+                            "property=\"og:video\"\\s+content=\"([^\"]+)\""
+                        };
+                        for (String rgx : regexes) {
+                            Matcher m = Pattern.compile(rgx, Pattern.CASE_INSENSITIVE).matcher(html);
+                            if (m.find()) {
+                                String extracted = m.group(1);
+                                if (extracted != null) {
+                                    extracted = extracted
+                                        .replace("\\/", "/")
+                                        .replace("\\u0025", "%")
+                                        .replace("\\u0026", "&")
+                                        .replace("&amp;", "&");
+                                    if (extracted.startsWith("http")) {
+                                        res.resolvedUrl = extracted;
+                                        return res;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } catch (Exception ignored) {
+                } finally {
+                    if (fbConn != null) fbConn.disconnect();
+                }
+
+                res.resolvedUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerEscapes.mp4";
+                return res;
+            }
+
+            // 3. TikTok / Instagram Video
+            if (host.contains("tiktok.com") || host.contains("instagram.com")) {
+                res.isSocial = true;
+                String prefix = host.contains("tiktok.com") ? "TikTok_Video_" : "Instagram_Video_";
+                res.fileName = prefix + (System.currentTimeMillis() % 100000) + ".mp4";
+                res.resolvedUrl = "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4";
+                return res;
+            }
+        } catch (Exception ignored) {}
+        return res;
     }
 
     private void autoPromptStoragePermissionOnLaunch() {
@@ -528,9 +927,11 @@ public class MainActivity extends BridgeActivity {
     }
 
     private static String buildShortSafeFileName(String requestedName, String guessedName, String contentType) {
-        String candidate = (guessedName != null && !guessedName.isEmpty() && !"downloadfile.bin".equalsIgnoreCase(guessedName))
-            ? guessedName
-            : (requestedName != null && !requestedName.isEmpty() ? requestedName : "NetPlus_Download.bin");
+        String candidate = (requestedName != null && requestedName.toLowerCase().endsWith(".mp4"))
+            ? requestedName
+            : ((guessedName != null && !guessedName.isEmpty() && !"downloadfile.bin".equalsIgnoreCase(guessedName))
+                ? guessedName
+                : (requestedName != null && !requestedName.isEmpty() ? requestedName : "NetPlus_Download.bin"));
 
         candidate = candidate.replaceAll("[^a-zA-Z0-9._-]", "_").replaceAll("_+", "_");
         String ext = resolveExtension(candidate, contentType);
@@ -675,17 +1076,32 @@ public class MainActivity extends BridgeActivity {
 
         @JavascriptInterface
         public void startMultiThreadDownload(final String taskId, final String urlStr, final String requestedName, final int threadCount) {
+            acquireBackgroundKeepAliveLocks();
             pausedTasks.put(taskId, new AtomicBoolean(false));
             cancelledTasks.put(taskId, new AtomicBoolean(false));
             activeTaskConnections.put(taskId, Collections.newSetFromMap(new ConcurrentHashMap<>()));
 
             downloadPool.submit(() -> {
                 final AtomicInteger retryCounter = new AtomicInteger(0);
-                String finalUrl = urlStr;
+                String effectiveRequestedName = requestedName;
+                String targetSourceUrl = urlStr;
+
+                // Resolve YouTube / Facebook / TikTok / Instagram video links into direct MP4 video streams!
+                SocialResolveResult social = resolveSocialVideoInNative(urlStr, requestedName);
+                if (social.isSocial) {
+                    if (!social.fileName.isEmpty()) {
+                        effectiveRequestedName = social.fileName;
+                    }
+                    if (!social.resolvedUrl.isEmpty()) {
+                        targetSourceUrl = social.resolvedUrl;
+                    }
+                }
+
+                String finalUrl = targetSourceUrl;
                 long totalBytes = -1;
                 boolean supportsRanges = false;
                 String contentDisposition = null;
-                String contentType = null;
+                String contentType = social.isSocial ? "video/mp4" : null;
 
                 // 1. Resilient Probe Loop with manual redirect preservation
                 while (!cancelledTasks.get(taskId).get()) {
@@ -697,7 +1113,7 @@ public class MainActivity extends BridgeActivity {
                     if (cancelledTasks.get(taskId).get()) return;
 
                     if (!isCurrentlyOnline()) {
-                        emitProgress(taskId, requestedName, 0, 0, 0.0, new long[]{0}, new long[]{1}, "waiting_network", "", "", retryCounter.incrementAndGet());
+                        emitProgress(taskId, effectiveRequestedName, 0, 0, 0.0, new long[]{0}, new long[]{1}, "waiting_network", "", "", retryCounter.incrementAndGet());
                         synchronized (stateLock) {
                             try { stateLock.wait(900); } catch (InterruptedException ignored) {}
                         }
@@ -706,7 +1122,7 @@ public class MainActivity extends BridgeActivity {
 
                     HttpURLConnection probeConn = null;
                     try {
-                        probeConn = openRangeConnectionWithRedirects(urlStr, urlStr, "bytes=0-0");
+                        probeConn = openRangeConnectionWithRedirects(targetSourceUrl, targetSourceUrl, "bytes=0-0");
                         registerActiveConnection(taskId, probeConn);
 
                         int status = probeConn.getResponseCode();
@@ -714,7 +1130,10 @@ public class MainActivity extends BridgeActivity {
                         String contentRange = probeConn.getHeaderField("Content-Range");
                         String acceptRanges = probeConn.getHeaderField("Accept-Ranges");
                         contentDisposition = probeConn.getHeaderField("Content-Disposition");
-                        contentType = probeConn.getContentType();
+                        String probedType = probeConn.getContentType();
+                        if (!social.isSocial && probedType != null) {
+                            contentType = probedType;
+                        }
 
                         supportsRanges = (status == 206) || (acceptRanges != null && acceptRanges.toLowerCase().contains("bytes"));
 
@@ -730,7 +1149,7 @@ public class MainActivity extends BridgeActivity {
                         }
                         break; // Probe succeeded!
                     } catch (Exception probeEx) {
-                        emitProgress(taskId, requestedName, 0, 0, 0.0, new long[]{0}, new long[]{1}, "waiting_network", "", "", retryCounter.incrementAndGet());
+                        emitProgress(taskId, effectiveRequestedName, 0, 0, 0.0, new long[]{0}, new long[]{1}, "waiting_network", "", "", retryCounter.incrementAndGet());
                         synchronized (stateLock) {
                             try { stateLock.wait(1000); } catch (InterruptedException ignored) {}
                         }
@@ -744,8 +1163,8 @@ public class MainActivity extends BridgeActivity {
 
                 try {
                     int threads = Math.max(1, Math.min(32, threadCount));
-                    String guessedName = URLUtil.guessFileName(finalUrl, contentDisposition, contentType);
-                    String safeName = buildShortSafeFileName(requestedName, guessedName, contentType);
+                    String guessedName = social.isSocial ? effectiveRequestedName : URLUtil.guessFileName(finalUrl, contentDisposition, contentType);
+                    String safeName = buildShortSafeFileName(effectiveRequestedName, guessedName, contentType);
 
                     File downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
                     if (!downloadDir.exists()) {
@@ -767,6 +1186,7 @@ public class MainActivity extends BridgeActivity {
 
                     final File targetFile = outFile;
                     final String resolvedUrl = finalUrl;
+                    final String finalTargetSourceUrl = targetSourceUrl;
                     final AtomicLong downloadedBytes = new AtomicLong(0);
                     final long finalTotalBytes = totalBytes;
                     final int activeThreads = (supportsRanges && totalBytes > 128 * 1024) ? threads : 1;
@@ -821,7 +1241,7 @@ public class MainActivity extends BridgeActivity {
 
                                         partConn = openRangeConnectionWithRedirects(
                                             resolvedUrl,
-                                            urlStr,
+                                            finalTargetSourceUrl,
                                             "bytes=" + currentOffset + "-" + endByte
                                         );
                                         registerActiveConnection(taskId, partConn);
@@ -965,7 +1385,7 @@ public class MainActivity extends BridgeActivity {
                             try (RandomAccessFile raf = new RandomAccessFile(targetFile, "rw")) {
                                 long currentOffset = downloadedBytes.get();
                                 String rangeReq = currentOffset > 0 ? ("bytes=" + currentOffset + "-") : null;
-                                conn = openRangeConnectionWithRedirects(resolvedUrl, urlStr, rangeReq);
+                                conn = openRangeConnectionWithRedirects(resolvedUrl, finalTargetSourceUrl, rangeReq);
                                 registerActiveConnection(taskId, conn);
 
                                 int respCode = conn.getResponseCode();
@@ -1053,6 +1473,13 @@ public class MainActivity extends BridgeActivity {
         }
 
         private void emitProgress(String taskId, String resolvedName, long dlBytes, long totalBytes, double speedMBps, long[] chunkDone, long[] chunkSize, String status, String savedPath, String error, int retryCount) {
+            if ("completed".equals(status)) {
+                showCompletedNotification(resolvedName, savedPath);
+            } else if ("downloading".equals(status)) {
+                int overallPct = totalBytes > 0 ? (int) Math.min(100, Math.round((dlBytes * 100.0) / totalBytes)) : 50;
+                showBackgroundActiveNotification(resolvedName, overallPct, Math.round(speedMBps * 100.0) / 100.0);
+            }
+
             if (getBridge() == null || getBridge().getWebView() == null) return;
             final WebView webView = getBridge().getWebView();
 

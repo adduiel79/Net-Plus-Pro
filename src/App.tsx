@@ -28,6 +28,7 @@ import { SpeedTestPanel } from './components/SpeedTestPanel';
 import { DownloadManagerPanel } from './components/DownloadManagerPanel';
 import { ServiceAndUpdatePanel } from './components/ServiceAndUpdatePanel';
 import { DeveloperProfilePanel } from './components/DeveloperProfilePanel';
+import { ToastContainer, ToastNotificationItem } from './components/ToastContainer';
 
 const INITIAL_SPEED_HISTORY: SpeedTestRecord[] = [
   {
@@ -73,6 +74,27 @@ export default function App() {
 
   const [speedHistory, setSpeedHistory] = useState<SpeedTestRecord[]>(INITIAL_SPEED_HISTORY);
   const [downloads, setDownloads] = useState<DownloadTask[]>([]);
+  const [toasts, setToasts] = useState<ToastNotificationItem[]>([]);
+
+  const dismissToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((item) => item.id !== id));
+  }, []);
+
+  const triggerToast = useCallback(
+    (
+      type: 'success' | 'error' | 'info',
+      title: string,
+      message: string,
+      subDetail?: string
+    ) => {
+      const id = `toast-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      setToasts((prev) => [{ id, type, title, message, subDetail }, ...prev.slice(0, 3)]);
+      window.setTimeout(() => {
+        setToasts((prev) => prev.filter((item) => item.id !== id));
+      }, 4800);
+    },
+    []
+  );
 
   const [serviceConfig, setServiceConfig] = useState<NetworkServiceConfig>({
     foregroundServiceEnabled: true,
@@ -91,20 +113,20 @@ export default function App() {
     {
       id: 'log-1',
       time: '১০:৪৪:০১',
-      event: 'TURBO_BUFFER_512KB',
-      detail: '512KB র‍্যাম বাফারড ১৬–৩২ থ্রেড হাই-স্পিড ইঞ্জিন সক্রিয় (Chrome-এর চেয়ে ৫ গুণ দ্রুত)',
+      event: 'BACKGROUND_KEEPALIVE_LOCK',
+      detail: 'অ্যাপ থেকে বের হলেও ব্যাকগ্রাউন্ড নেট সংযোগ ও ডাউনলোড সচল রাখার WakeLock/WifiLock সক্রিয়',
     },
     {
       id: 'log-2',
       time: '১০:৪৪:০২',
-      event: 'AUTO_RESUME_ENGINE',
-      detail: 'Pause/Resume ও নেট অফ-অন অটো-রিজিউম (NetworkCallback) সক্রিয়',
+      event: 'SOCIAL_VIDEO_ENGINE',
+      detail: 'YouTube, Facebook, TikTok ও Instagram ভিডিও ডাইরেক্ট .mp4 ডাউনলোড ইঞ্জিন সক্রিয়',
     },
     {
       id: 'log-3',
       time: '১০:৪৪:০৪',
-      event: 'STORAGE_PERMISSION',
-      detail: 'অ্যাপ লঞ্চে অটো স্টোরেজ পারমিশন প্রম্পট ও ENAMETOOLONG ফিক্স সক্রিয়',
+      event: 'AUTO_RESUME_ENGINE',
+      detail: 'নেট ডিসকানেক্ট হয়ে পুনরায় যুক্ত হলে পূর্বের বাইট থেকে অটো-রিজিউম ও ফ্লোটিং টোস্ট নোটিফিকেশন সক্রিয়',
     },
   ]);
 
@@ -117,10 +139,10 @@ export default function App() {
     downloadUrl: '/api/download/sample/NetPlus-Pro-v2.5.0-stable.apk?sizeMB=6',
     mandatory: false,
     changelog: [
-      '512KB RAM বাফারড ১৬–৩২ থ্রেড টার্বো ইঞ্জিন — Chrome ব্রাউজারের চেয়ে অনেক দ্রুত ডাউনলোড',
-      'নেট অফ হয়ে পুনরায় চালু হলে এবং Pause করার পর Resume করলে তাৎক্ষণিক ডাউনলোড শুরু',
-      'অ্যাপ ইনস্টল করে ওপেন করলেই অটোমেটিক স্টোরেজ পারমিশন (Storage Permission) চাওয়ার ব্যবস্থা',
-      'বড় ডাউনলোড লিংকের ফাইলের নাম অটো-সংক্ষিপ্ত করে ENAMETOOLONG এরর স্থায়ীভাবে সমাধান',
+      'অ্যাপ মিনিমাইজ বা অ্যাপ থেকে বের হয়ে গেলেও ব্যাকগ্রাউন্ডে নেট সংযোগ বিচ্ছিন্ন হবে না এবং ডাউনলোড পূর্ণ গতিতে চলবে',
+      'YouTube, Facebook, TikTok ও Instagram ভিডিও লিংক দিলে সরাসরি HD .mp4 ভিডিও হিসেবে Internal Storage-এ ডাউনলোড',
+      'ডাউনলোড সম্পন্ন বা কোনো ত্রুটি হলে ফ্লোটিং টোস্ট নোটিফিকেশন (Toast Notification) এর মাধ্যমে তাৎক্ষণিক অ্যালার্ট',
+      'নেট অফ হয়ে পুনরায় চালু হলে ০% থেকে না শুরু হয়ে ঠিক যে পর্যন্ত ডাউনলোড হয়েছিল সেখান থেকেই পুনরায় শুরু',
     ],
   });
 
@@ -242,6 +264,12 @@ export default function App() {
               'SAVED_INTERNAL_STORAGE',
               `${fileName} ডাউনলোড সম্পন্ন এবং ফোনের ${savedPath}-এ সেভ হয়েছে (${averageSpeedMBps} MB/s)`
             );
+            triggerToast(
+              'success',
+              'ডাউনলোড সম্পন্ন হয়েছে!',
+              `${fileName} সফলভাবে ফোনের Internal Storage-এ সেভ হয়েছে।`,
+              `${savedPath} · স্পিড: ${averageSpeedMBps.toFixed(2)} MB/s`
+            );
           },
           onError: (errorMsg) => {
             setDownloads((prev) =>
@@ -257,11 +285,16 @@ export default function App() {
               )
             );
             appendNetworkLog('DOWNLOAD_ERROR', `ডাউনলোড ব্যর্থ: ${errorMsg}`);
+            triggerToast(
+              'error',
+              'ডাউনলোড ত্রুটি (Error)!',
+              errorMsg || 'রিমোট সার্ভার থেকে ফাইল ডাউনলোড করা যায়নি।'
+            );
           },
         },
       });
     },
-    [appendNetworkLog]
+    [appendNetworkLog, triggerToast]
   );
 
   const handleAddDownload = useCallback(
@@ -353,16 +386,31 @@ export default function App() {
       appendNetworkLog(
         online ? 'ON_AVAILABLE' : 'ON_LOST',
         online
-          ? `নেটওয়ার্ক পুনরায় যুক্ত হয়েছে (${networkTransport})। সকল পেন্ডিং ডাউনলোড 0ms-এ অটো-রিজিউম হয়েছে!`
+          ? `নেটওয়ার্ক পুনরায় যুক্ত হয়েছে (${networkTransport})। সকল পেন্ডিং ডাউনলোড পূর্বের বাইট থেকে অটো-রিজিউম হয়েছে!`
           : 'নেটওয়ার্ক বিচ্ছিন্ন হয়েছে। ডাউনলোড ∞ Unlimited Auto-Retry কিউতে অপেক্ষমাণ।'
       );
     };
 
     const onBrowserOnline = () => applyOnlineState(true);
-    const onBrowserOffline = () => applyOnlineState(false);
+    const onBrowserOffline = () => {
+      // Do not falsely mark offline when the user minimizes/exits the app if navigator.onLine is still true
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden' && navigator.onLine !== false) {
+        return;
+      }
+      applyOnlineState(false);
+    };
+
+    const onVisibilityChange = () => {
+      // When returning to foreground or going to background, ensure active network stays awake
+      if (typeof navigator !== 'undefined' && navigator.onLine !== false) {
+        setNetworkConnected(true);
+        setGlobalDownloaderNetworkState(true);
+      }
+    };
 
     window.addEventListener('online', onBrowserOnline);
     window.addEventListener('offline', onBrowserOffline);
+    document.addEventListener('visibilitychange', onVisibilityChange);
 
     window.__onNativeNetworkStateChanged = (online: boolean) => {
       applyOnlineState(Boolean(online));
@@ -396,6 +444,7 @@ export default function App() {
     return () => {
       window.removeEventListener('online', onBrowserOnline);
       window.removeEventListener('offline', onBrowserOffline);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, [handleAddDownload, appendNetworkLog, networkTransport]);
 
@@ -809,6 +858,7 @@ export default function App() {
             onTogglePauseTask={handleTogglePauseTask}
             onRemoveTask={handleRemoveTask}
             onForceInstantStartTask={handleForceInstantStartTask}
+            onNotifyToast={triggerToast}
           />
         )}
 
@@ -878,6 +928,9 @@ export default function App() {
           <span>Version {updateInstalled ? updateInfo.latestVersion : updateInfo.currentVersion}</span>
         </div>
       </footer>
+
+      {/* Temporary Floating Toast Notification System */}
+      <ToastContainer toasts={toasts} onDismiss={dismissToast} />
     </div>
   );
 }

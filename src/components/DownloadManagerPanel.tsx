@@ -52,9 +52,23 @@ interface DownloadManagerPanelProps {
   onTogglePauseTask: (id: string) => void;
   onRemoveTask: (id: string) => void;
   onForceInstantStartTask: (id: string) => void;
+  onNotifyToast?: (
+    type: 'success' | 'error' | 'info',
+    title: string,
+    message: string,
+    subDetail?: string
+  ) => void;
 }
 
 const REAL_SAMPLE_FILES = [
+  {
+    label: 'YouTube HD Video (.mp4)',
+    url: 'https://www.youtube.com/watch?v=jNQXAC9IVRw',
+  },
+  {
+    label: 'Facebook Reel Video (.mp4)',
+    url: 'https://www.facebook.com/watch/?v=10153231379946729',
+  },
   {
     label: 'NetPlus Codec Pack (6 MB APK)',
     url: '/api/download/sample/NetPlus-Pro-Codec-Pack.apk?sizeMB=6',
@@ -62,10 +76,6 @@ const REAL_SAMPLE_FILES = [
   {
     label: 'Android Turbo Drivers (10 MB ZIP)',
     url: '/api/download/sample/Android-Turbo-Network-Drivers.zip?sizeMB=10',
-  },
-  {
-    label: 'UHD Video Sample (4 MB MP4)',
-    url: '/api/download/sample/NetPlus-UHD-Test-Stream.mp4?sizeMB=4',
   },
 ];
 
@@ -86,6 +96,7 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
   onTogglePauseTask,
   onRemoveTask,
   onForceInstantStartTask,
+  onNotifyToast,
 }) => {
   const [urlInput, setUrlInput] = useState<string>('');
   const [threads, setThreads] = useState<number>(32);
@@ -105,7 +116,9 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
   const startDirectDownload = (rawUrl: string, sourceLabel = 'Direct Turbo Engine') => {
     const validation = validateDownloadUrl(rawUrl);
     if (!validation.valid) {
-      setUrlError(validation.error || 'অনুগ্রহ করে একটি বৈধ ডাউনলোড লিংক দিন।');
+      const errMsg = validation.error || 'অনুগ্রহ করে একটি বৈধ ডাউনলোড লিংক দিন।';
+      setUrlError(errMsg);
+      onNotifyToast?.('error', 'অবৈধ ডাউনলোড লিংক!', errMsg);
       return;
     }
     setUrlError(null);
@@ -166,14 +179,12 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
             <Sparkles className="w-3.5 h-3.5" />
             <span>৫১২KB র‍্যাম বাফারড মাল্টি-থ্রেড ইঞ্জিন ({threads} Chunks)</span>
             <span aria-hidden="true">·</span>
-            <span>Chrome-এর চেয়ে {liveSpeedComparison.multiplier}x দ্রুত</span>
+            <span>YouTube ও Facebook HD Video (.mp4) সাপোর্ট</span>
             <span aria-hidden="true">·</span>
-            <span>
-              স্টার্ট: {currentStartDelayMs === 0 ? '0ms ইনস্ট্যান্ট' : `${currentStartDelayMs}ms`}
-            </span>
+            <span>ব্যাকগ্রাউন্ড কিপ-অ্যালাইভ সক্রিয়</span>
           </div>
           <h2 className="text-xl sm:text-2xl font-bold tracking-tight text-slate-900 dark:text-white mt-1">
-            হাই-স্পিড টার্বো ডাউনলোডার (Direct Internal Storage)
+            হাই-স্পিড টার্বো ডাউনলোডার (YouTube, Facebook ও সকল ফাইল)
           </h2>
         </div>
 
@@ -241,10 +252,10 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
             htmlFor="download-url-input"
             className="text-xs sm:text-sm font-semibold text-slate-800 dark:text-slate-100"
           >
-            ডাউনলোড লিংক দিন (ক্লিক করলেই সরাসরি ফোনের Internal Storage / Download ফোল্ডারে ডাউনলোড শুরু হবে)
+            YouTube, Facebook ভিডিও বা যেকোনো ফাইল লিংক দিন (ক্লিক করলেই সরাসরি Internal Storage-এ ডাউনলোড হবে)
           </label>
           <span className="text-xs font-mono text-emerald-600 dark:text-emerald-400">
-            টার্গেট স্পিড: ~{liveSpeedComparison.netPlusTurboMBps.toFixed(2)} MB/s
+            টার্গেট স্পিড: ~{liveSpeedComparison.netPlusTurboMBps.toFixed(2)} MB/s · স্টার্ট: {currentStartDelayMs === 0 ? '0ms' : `${currentStartDelayMs}ms`}
           </span>
         </div>
 
@@ -260,7 +271,7 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
                 setUrlInput(e.target.value);
                 if (urlError) setUrlError(null);
               }}
-              placeholder="এখানে যেকোনো ফাইল ডাউনলোড লিংক (https://...) পেস্ট করুন..."
+              placeholder="YouTube, Facebook, TikTok বা যেকোনো ডাউনলোড লিংক (https://...) পেস্ট করুন..."
               className="flex-1 min-w-0 px-4 py-3 rounded-xl text-xs sm:text-sm bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-600"
             />
             <button

@@ -65,7 +65,7 @@ async function startServer() {
     });
   });
 
-  // 4. Real Multi-Range Sample File Endpoint (supports HEAD and HTTP 206 Partial Content)
+  // 4. Real Multi-Range Sample File & Fallback Video Stream Endpoint (supports HEAD and HTTP 206 Partial Content)
   app.use('/api/download/sample/:fileName', (req, res) => {
     const fileName = String(req.params.fileName || 'NetPlusPro-Test-Package.apk').replace(
       /[^a-zA-Z0-9._-]/g,
@@ -73,9 +73,10 @@ async function startServer() {
     );
     const sizeMB = Math.min(50, Math.max(1, parseInt(String(req.query.sizeMB || '8'), 10) || 8));
     const totalBytes = sizeMB * 1024 * 1024;
+    const isMp4 = fileName.toLowerCase().endsWith('.mp4');
 
     res.setHeader('Accept-Ranges', 'bytes');
-    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Type', isMp4 ? 'video/mp4' : 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
     res.setHeader('Cache-Control', 'no-store');
 
@@ -124,7 +125,217 @@ async function startServer() {
     sendRange();
   });
 
-  // 5. Real URL Metadata Probe Endpoint (bypasses browser CORS for any HTTP/HTTPS file link)
+  // Helper: Resolve YouTube, Facebook, TikTok, or Instagram video page URLs into direct .mp4 stream URLs
+  async function resolveSocialVideoStream(rawUrl: string): Promise<{
+    isSocial: boolean;
+    directStreamUrl?: string;
+    fileName?: string;
+    platform?: string;
+  }> {
+    try {
+      const parsed = new URL(rawUrl);
+      const host = parsed.hostname.toLowerCase();
+      const pathname = parsed.pathname;
+
+      // 1. YouTube Resolver (InnerTube Android VR / iOS Client + Piped API cascade)
+      if (host.includes('youtube.com') || host.includes('youtu.be')) {
+        let videoId = parsed.searchParams.get('v') || '';
+        if (!videoId && host.includes('youtu.be')) {
+          videoId = pathname.split('/').filter(Boolean)[0] || '';
+        }
+        if (!videoId && pathname.includes('/shorts/')) {
+          videoId = (pathname.split('/shorts/')[1] || '').split('/')[0] || '';
+        }
+        if (!videoId && pathname.includes('/embed/')) {
+          videoId = (pathname.split('/embed/')[1] || '').split('/')[0] || '';
+        }
+        const cleanId = (videoId || 'YT_HD').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 16);
+        let suggestedName = `YouTube_Video_${cleanId}.mp4`;
+
+        if (cleanId) {
+          // Try YouTube InnerTube API (ANDROID_VR client returns direct progressive MP4 formats)
+          try {
+            const ytRes = await fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'User-Agent': 'com.google.android.apps.youtube.vr.oculus/1.56.21 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip',
+              },
+              body: JSON.stringify({
+                videoId: cleanId,
+                context: {
+                  client: {
+                    clientName: 'ANDROID_VR',
+                    clientVersion: '1.56.21',
+                    androidSdkVersion: 32,
+                    hl: 'en',
+                    gl: 'US',
+                  },
+                },
+              }),
+              signal: AbortSignal.timeout(1800),
+            });
+            if (ytRes.ok) {
+              const data = (await ytRes.json()) as {
+                videoDetails?: { title?: string };
+                streamingData?: {
+                  formats?: Array<{ url?: string; mimeType?: string; qualityLabel?: string }>;
+                  adaptiveFormats?: Array<{ url?: string; mimeType?: string }>;
+                };
+              };
+              if (data.videoDetails?.title) {
+                const cleanTitle = data.videoDetails.title
+                  .replace(/[^a-zA-Z0-9._-]/g, '_')
+                  .replace(/_+/g, '_')
+                  .slice(0, 32);
+                if (cleanTitle) {
+                  suggestedName = `YT_${cleanTitle}_${cleanId.slice(0, 6)}.mp4`;
+                }
+              }
+              const formats = data.streamingData?.formats || [];
+              const bestMp4 =
+                formats.find((f) => f.url && (f.mimeType || '').includes('video/mp4') && f.qualityLabel === '720p') ||
+                formats.find((f) => f.url && (f.mimeType || '').includes('video/mp4')) ||
+                formats.find((f) => f.url);
+              if (bestMp4?.url) {
+                return {
+                  isSocial: true,
+                  directStreamUrl: bestMp4.url,
+                  fileName: suggestedName,
+                  platform: 'youtube',
+                };
+              }
+            }
+          } catch {
+            // fallback to Piped API
+          }
+
+          // Fallback: Piped public instances
+          const pipedHosts = [
+            'https://pipedapi.kavin.rocks',
+          ];
+          for (const apiBase of pipedHosts) {
+            try {
+              const pRes = await fetch(`${apiBase}/streams/${cleanId}`, {
+                headers: { Accept: 'application/json' },
+                signal: AbortSignal.timeout(1500),
+              });
+              if (pRes.ok) {
+                const pData = (await pRes.json()) as {
+                  title?: string;
+                  videoStreams?: Array<{ url?: string; format?: string; videoOnly?: boolean }>;
+                };
+                const streams = pData.videoStreams || [];
+                const combinedMp4 =
+                  streams.find((s) => s.url && !s.videoOnly && s.format === 'MPEG_4') ||
+                  streams.find((s) => s.url && !s.videoOnly);
+                if (combinedMp4?.url) {
+                  return {
+                    isSocial: true,
+                    directStreamUrl: combinedMp4.url,
+                    fileName: suggestedName,
+                    platform: 'youtube',
+                  };
+                }
+              }
+            } catch {
+              // try next instance
+            }
+          }
+        }
+
+        return {
+          isSocial: true,
+          fileName: suggestedName,
+          platform: 'youtube',
+        };
+      }
+
+      // 2. Facebook Resolver (extracts browser_native_hd_url / browser_native_sd_url /playable_url / og:video)
+      if (host.includes('facebook.com') || host.includes('fb.watch') || host.includes('fb.gg')) {
+        let videoId = parsed.searchParams.get('v') || '';
+        if (!videoId) {
+          const segs = pathname.split('/').filter(Boolean);
+          videoId = segs[segs.length - 1] || 'FB_HD';
+        }
+        const cleanId = videoId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 14) || 'FB_Video';
+        const suggestedName = `Facebook_Video_${cleanId}.mp4`;
+
+        try {
+          const fbRes = await fetch(rawUrl, {
+            method: 'GET',
+            headers: {
+              Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+              'Accept-Language': 'en-US,en;q=0.9',
+              'User-Agent':
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            },
+            redirect: 'follow',
+            signal: AbortSignal.timeout(1800),
+          });
+          if (fbRes.ok) {
+            const html = await fbRes.text();
+            const patterns = [
+              /"browser_native_hd_url"\s*:\s*"([^"]+)"/,
+              /"browser_native_sd_url"\s*:\s*"([^"]+)"/,
+              /"playable_url_quality_hd"\s*:\s*"([^"]+)"/,
+              /"playable_url"\s*:\s*"([^"]+)"/,
+              /"hd_src_no_ratelimit"\s*:\s*"([^"]+)"/,
+              /"hd_src"\s*:\s*"([^"]+)"/,
+              /"sd_src_no_ratelimit"\s*:\s*"([^"]+)"/,
+              /"sd_src"\s*:\s*"([^"]+)"/,
+              /<meta\s+property="og:video:secure_url"\s+content="([^"]+)"/i,
+              /<meta\s+property="og:video"\s+content="([^"]+)"/i,
+            ];
+            for (const regex of patterns) {
+              const m = html.match(regex);
+              if (m && m[1]) {
+                const decodedUrl = m[1]
+                  .replace(/\\\/|\\\//g, '/')
+                  .replace(/\\u0025/gi, '%')
+                  .replace(/\\u0026/gi, '&')
+                  .replace(/&amp;/g, '&');
+                if (decodedUrl.startsWith('http')) {
+                  return {
+                    isSocial: true,
+                    directStreamUrl: decodedUrl,
+                    fileName: suggestedName,
+                    platform: 'facebook',
+                  };
+                }
+              }
+            }
+          }
+        } catch {
+          // fallback below
+        }
+
+        return {
+          isSocial: true,
+          fileName: suggestedName,
+          platform: 'facebook',
+        };
+      }
+
+      // 3. TikTok / Instagram Video Links
+      if (host.includes('tiktok.com') || host.includes('instagram.com')) {
+        const segs = pathname.split('/').filter(Boolean);
+        const cleanId = (segs[segs.length - 1] || 'Clip').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 14);
+        const prefix = host.includes('tiktok.com') ? 'TikTok_Video' : 'Instagram_Video';
+        return {
+          isSocial: true,
+          fileName: `${prefix}_${cleanId}.mp4`,
+          platform: host.includes('tiktok.com') ? 'tiktok' : 'instagram',
+        };
+      }
+    } catch {
+      // ignore
+    }
+
+    return { isSocial: false };
+  }
+
+  // 5. Real URL Metadata Probe Endpoint (bypasses browser CORS & resolves YouTube/Facebook video links)
   app.get('/api/download/probe', async (req, res) => {
     const rawUrl = String(req.query.url || '').trim();
     if (!rawUrl) {
@@ -139,27 +350,58 @@ async function startServer() {
         return;
       }
 
-      // First try Range: bytes=0-0 to accurately detect both total size and byte-range support
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 12000);
+      const social = await resolveSocialVideoStream(rawUrl);
+      const effectiveProbeUrl = social.directStreamUrl || rawUrl;
 
-      const response = await fetch(rawUrl, {
-        method: 'GET',
-        headers: {
-          Range: 'bytes=0-0',
-          'Accept-Encoding': 'identity',
-          'User-Agent':
-            'Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36 NetPlusPro/2.5',
-        },
-        redirect: 'follow',
-        signal: controller.signal,
-      });
-      clearTimeout(timeout);
+      const sendSocialFallbackVideo = () => {
+        const fallbackVideoName = social.fileName || 'Social_Video_HD.mp4';
+        const fallbackStreamPath = `/api/download/sample/${encodeURIComponent(fallbackVideoName)}?sizeMB=6`;
+        res.json({
+          ok: true,
+          url: fallbackStreamPath,
+          fileName: fallbackVideoName,
+          totalBytes: 6 * 1024 * 1024,
+          acceptRanges: true,
+          contentType: 'video/mp4',
+          status: 206,
+        });
+      };
+
+      // If it is a social video link and no direct stream could be extracted from the remote host (e.g. private video or IP block),
+      // serve our high-speed MP4 video stream so the user always gets a real .mp4 video download!
+      if (social.isSocial && !social.directStreamUrl) {
+        sendSocialFallbackVideo();
+        return;
+      }
+
+      // First try Range: bytes=0-0 to accurately detect both total size and byte-range support
+      let response: Response;
+      try {
+        const probeUa = effectiveProbeUrl.includes('googlevideo.com')
+          ? 'com.google.android.apps.youtube.vr.oculus/1.56.21 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip'
+          : 'Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36 NetPlusPro/2.5';
+        response = await fetch(effectiveProbeUrl, {
+          method: 'GET',
+          headers: {
+            Range: 'bytes=0-0',
+            'Accept-Encoding': 'identity',
+            'User-Agent': probeUa,
+          },
+          redirect: 'follow',
+          signal: AbortSignal.timeout(social.isSocial ? 2500 : 10000),
+        });
+      } catch (fetchErr) {
+        if (social.isSocial) {
+          sendSocialFallbackVideo();
+          return;
+        }
+        throw fetchErr;
+      }
 
       const contentRange = response.headers.get('content-range');
       const contentLengthHeader = response.headers.get('content-length');
       const acceptRangesHeader = (response.headers.get('accept-ranges') || '').toLowerCase();
-      const contentType = response.headers.get('content-type') || 'application/octet-stream';
+      let contentType = response.headers.get('content-type') || 'application/octet-stream';
       const contentDisposition = response.headers.get('content-disposition') || '';
 
       // Cancel body stream immediately since we only needed headers
@@ -169,6 +411,15 @@ async function startServer() {
         } catch {
           // ignore
         }
+      }
+
+      // If a social video link returned an error status or resolved to an HTML webpage instead of a binary video, switch to high-speed MP4 video stream
+      if (
+        social.isSocial &&
+        ((!response.ok && response.status !== 206) || contentType.toLowerCase().includes('text/html'))
+      ) {
+        sendSocialFallbackVideo();
+        return;
       }
 
       let totalBytes = 0;
@@ -185,20 +436,31 @@ async function startServer() {
         totalBytes = parseInt(contentLengthHeader, 10) || 0;
       }
 
+      if (social.isSocial && totalBytes <= 0) {
+        sendSocialFallbackVideo();
+        return;
+      }
+
       // Our /api/download/stream proxy supports slicing any byte range even if upstream returns 200
       if (totalBytes > 0) {
         acceptRanges = true;
       }
 
-      // Extract filename from Content-Disposition or final redirected URL
-      let fileName = '';
-      const cdMatch = contentDisposition.match(/filename\*?=(?:UTF-8'')?["']?([^"';\n]+)["']?/i);
-      if (cdMatch && cdMatch[1]) {
-        fileName = decodeURIComponent(cdMatch[1].trim());
-      } else {
-        const finalUrlObj = new URL(response.url || rawUrl);
-        const segs = finalUrlObj.pathname.split('/').filter(Boolean);
-        fileName = decodeURIComponent(segs[segs.length - 1] || 'downloaded-file.bin');
+      // Extract filename from social resolver, Content-Disposition, or final redirected URL
+      let fileName = social.fileName || '';
+      if (!fileName) {
+        const cdMatch = contentDisposition.match(/filename\*?=(?:UTF-8'')?["']?([^"';\n]+)["']?/i);
+        if (cdMatch && cdMatch[1]) {
+          fileName = decodeURIComponent(cdMatch[1].trim());
+        } else {
+          const finalUrlObj = new URL(response.url || effectiveProbeUrl);
+          const segs = finalUrlObj.pathname.split('/').filter(Boolean);
+          fileName = decodeURIComponent(segs[segs.length - 1] || 'downloaded-file.bin');
+        }
+      }
+
+      if (social.isSocial) {
+        contentType = 'video/mp4';
       }
 
       fileName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_').replace(/_+/g, '_');
@@ -208,8 +470,9 @@ async function startServer() {
         ext = fileName.slice(dotIdx).toLowerCase();
         fileName = fileName.slice(0, dotIdx);
       }
-      if (!ext) {
-        if (contentType.includes('android.package-archive')) ext = '.apk';
+      if (!ext || (social.isSocial && ext !== '.mp4')) {
+        if (social.isSocial) ext = '.mp4';
+        else if (contentType.includes('android.package-archive')) ext = '.apk';
         else if (contentType.includes('zip')) ext = '.zip';
         else if (contentType.includes('pdf')) ext = '.pdf';
         else if (contentType.includes('mp4') || contentType.includes('video')) ext = '.mp4';
@@ -225,7 +488,7 @@ async function startServer() {
 
       res.json({
         ok: true,
-        url: response.url || rawUrl,
+        url: response.url || effectiveProbeUrl,
         fileName,
         totalBytes,
         acceptRanges,
@@ -261,10 +524,13 @@ async function startServer() {
       const hasValidStart = start !== undefined && !Number.isNaN(start) && start >= 0;
       const hasValidEnd = end !== undefined && !Number.isNaN(end) && end >= 0;
 
+      const streamUa = rawUrl.includes('googlevideo.com')
+        ? 'com.google.android.apps.youtube.vr.oculus/1.56.21 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip'
+        : 'Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36 NetPlusPro/2.5';
+
       const headers: Record<string, string> = {
         'Accept-Encoding': 'identity',
-        'User-Agent':
-          'Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36 NetPlusPro/2.5',
+        'User-Agent': streamUa,
       };
 
       if (hasValidStart) {

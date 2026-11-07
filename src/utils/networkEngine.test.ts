@@ -8,6 +8,7 @@ import {
   computeDownloadStartDelayMs,
   isNewerVersion,
   validateDownloadUrl,
+  detectSocialVideoUrl,
   formatRemainingTimeBn,
   computeResumedProgressState,
 } from './networkEngine';
@@ -75,6 +76,19 @@ test('validateDownloadUrl validates HTTP/HTTPS URLs and extracts filenames', () 
   assert.ok(longUrlRes.fileName.length <= 55, `Expected <= 55 chars, got ${longUrlRes.fileName.length}: ${longUrlRes.fileName}`);
 });
 
+test('detectSocialVideoUrl and validateDownloadUrl recognize YouTube and Facebook links as .mp4 videos', () => {
+  const yt = validateDownloadUrl('https://www.youtube.com/watch?v=dQw4w9WgXcQ');
+  assert.equal(yt.valid, true);
+  assert.equal(yt.isSocialVideo, true);
+  assert.equal(yt.socialPlatform, 'youtube');
+  assert.equal(yt.fileName, 'YouTube_Video_dQw4w9WgXcQ.mp4');
+
+  const fb = detectSocialVideoUrl('https://www.facebook.com/reel/9876543210');
+  assert.equal(fb.isSocialVideo, true);
+  assert.equal(fb.platform, 'facebook');
+  assert.equal(fb.suggestedFileName, 'Facebook_Video_9876543210.mp4');
+});
+
 test('formatRemainingTimeBn formats seconds into minutes and seconds in Bengali', () => {
   assert.equal(formatRemainingTimeBn(45), '০ মিনিট 45 সেকেন্ড বাকি');
   assert.equal(formatRemainingTimeBn(135), '2 মিনিট 15 সেকেন্ড বাকি');
@@ -90,4 +104,5 @@ test('computeResumedProgressState preserves downloaded bytes and chunk progress 
   assert.equal(afterResume.downloadedBytes, 20971520);
   assert.deepEqual(afterResume.chunkProgress, [68, 75, 58, 70]);
 });
+
 

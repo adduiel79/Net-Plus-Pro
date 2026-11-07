@@ -281,14 +281,115 @@ export function sanitizeAndShortenFileName(rawName: string, mimeType?: string): 
   return `${base}${ext}`;
 }
 
+export interface SocialVideoResolution {
+  isSocialVideo: boolean;
+  platform: 'youtube' | 'facebook' | 'tiktok' | 'instagram' | 'direct';
+  videoId: string;
+  suggestedFileName: string;
+}
+
 /**
- * Validates a download URL (including extracting URLs from shared text) and extracts a safe, short file name.
+ * Detects YouTube, Facebook, TikTok, and Instagram video links and extracts a clean .mp4 filename.
+ */
+export function detectSocialVideoUrl(rawUrl: string): SocialVideoResolution {
+  try {
+    const parsed = new URL(rawUrl);
+    const host = parsed.hostname.toLowerCase();
+    const pathname = parsed.pathname;
+
+    // 1. YouTube (youtube.com/watch?v=..., youtu.be/..., youtube.com/shorts/...)
+    if (host.includes('youtube.com') || host.includes('youtu.be')) {
+      let videoId = parsed.searchParams.get('v') || '';
+      if (!videoId && host.includes('youtu.be')) {
+        videoId = pathname.split('/').filter(Boolean)[0] || '';
+      }
+      if (!videoId && pathname.includes('/shorts/')) {
+        const parts = pathname.split('/shorts/');
+        videoId = (parts[1] || '').split('/')[0] || '';
+      }
+      if (!videoId && pathname.includes('/embed/')) {
+        const parts = pathname.split('/embed/');
+        videoId = (parts[1] || '').split('/')[0] || '';
+      }
+      const cleanId = (videoId || String(Date.now()).slice(-6)).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 16);
+      return {
+        isSocialVideo: true,
+        platform: 'youtube',
+        videoId: cleanId,
+        suggestedFileName: `YouTube_Video_${cleanId}.mp4`,
+      };
+    }
+
+    // 2. Facebook (facebook.com/watch?v=..., facebook.com/reel/..., fb.watch/..., facebook.com/.../videos/...)
+    if (host.includes('facebook.com') || host.includes('fb.watch') || host.includes('fb.gg')) {
+      let videoId = parsed.searchParams.get('v') || '';
+      if (!videoId) {
+        const segs = pathname.split('/').filter(Boolean);
+        const reelIdx = segs.indexOf('reel');
+        const videosIdx = segs.indexOf('videos');
+        if (reelIdx >= 0 && segs[reelIdx + 1]) {
+          videoId = segs[reelIdx + 1];
+        } else if (videosIdx >= 0 && segs[videosIdx + 1]) {
+          videoId = segs[videosIdx + 1];
+        } else if (segs.length > 0) {
+          videoId = segs[segs.length - 1];
+        }
+      }
+      const cleanId = (videoId || String(Date.now()).slice(-6)).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 16);
+      return {
+        isSocialVideo: true,
+        platform: 'facebook',
+        videoId: cleanId,
+        suggestedFileName: `Facebook_Video_${cleanId}.mp4`,
+      };
+    }
+
+    // 3. TikTok
+    if (host.includes('tiktok.com')) {
+      const segs = pathname.split('/').filter(Boolean);
+      const vid = (segs[segs.length - 1] || String(Date.now()).slice(-6)).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 16);
+      return {
+        isSocialVideo: true,
+        platform: 'tiktok',
+        videoId: vid,
+        suggestedFileName: `TikTok_Video_${vid}.mp4`,
+      };
+    }
+
+    // 4. Instagram Reels / Video
+    if (host.includes('instagram.com')) {
+      const segs = pathname.split('/').filter(Boolean);
+      const vid = (segs[segs.length - 1] || String(Date.now()).slice(-6)).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 16);
+      return {
+        isSocialVideo: true,
+        platform: 'instagram',
+        videoId: vid,
+        suggestedFileName: `Instagram_Video_${vid}.mp4`,
+      };
+    }
+  } catch {
+    // ignore invalid URL
+  }
+
+  return {
+    isSocialVideo: false,
+    platform: 'direct',
+    videoId: '',
+    suggestedFileName: '',
+  };
+}
+
+/**
+ * Validates a download URL (including extracting URLs from shared text, YouTube, and Facebook links)
+ * and extracts a safe, short file name.
  */
 export function validateDownloadUrl(rawUrl: string): {
   valid: boolean;
   error?: string;
   fileName: string;
   normalizedUrl?: string;
+  isSocialVideo?: boolean;
+  socialPlatform?: 'youtube' | 'facebook' | 'tiktok' | 'instagram' | 'direct';
 } {
   let trimmed = rawUrl.trim();
   if (!trimmed) {
@@ -300,7 +401,7 @@ export function validateDownloadUrl(rawUrl: string): {
   if (embeddedMatch && embeddedMatch[0]) {
     trimmed = embeddedMatch[0];
   } else if (!trimmed.startsWith('/') && !/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(trimmed)) {
-    // If user typed a domain like "example.com/file.apk", prepend https://
+    // If user typed a domain like "youtube.com/watch?v=..." or "facebook.com/...", prepend https://
     if (trimmed.includes('.') && !trimmed.includes(' ')) {
       trimmed = `https://${trimmed}`;
     }
@@ -315,6 +416,18 @@ export function validateDownloadUrl(rawUrl: string): {
         valid: false,
         error: 'শুধুমাত্র HTTP বা HTTPS প্রোটোকল সমর্থিত (Only HTTP/HTTPS supported).',
         fileName: '',
+      };
+    }
+
+    // Check if this is a YouTube, Facebook, TikTok, or Instagram video link
+    const socialInfo = detectSocialVideoUrl(parsed.toString());
+    if (socialInfo.isSocialVideo) {
+      return {
+        valid: true,
+        fileName: socialInfo.suggestedFileName,
+        normalizedUrl: parsed.toString(),
+        isSocialVideo: true,
+        socialPlatform: socialInfo.platform,
       };
     }
 
@@ -333,6 +446,8 @@ export function validateDownloadUrl(rawUrl: string): {
         valid: true,
         fileName: sanitizeAndShortenFileName(decodeURIComponent(rawCandidate)),
         normalizedUrl: trimmed,
+        isSocialVideo: false,
+        socialPlatform: 'direct',
       };
     }
 
@@ -349,6 +464,8 @@ export function validateDownloadUrl(rawUrl: string): {
       valid: true,
       fileName: sanitizeAndShortenFileName(decoded),
       normalizedUrl: trimmed,
+      isSocialVideo: false,
+      socialPlatform: 'direct',
     };
   } catch {
     return {

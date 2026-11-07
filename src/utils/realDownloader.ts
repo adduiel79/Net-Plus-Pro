@@ -536,12 +536,22 @@ export async function startRealMultiThreadDownload(params: {
           control.abortControllers.add(ac);
 
           try {
-            const streamUrl = isLocalSample
+            const isDirectLocalSample =
+              isLocalSample ||
+              resolvedStreamUrl.startsWith('/api/download/sample/') ||
+              resolvedStreamUrl.includes('/api/download/sample/');
+            const directSamplePath = isLocalSample
               ? targetUrl
+              : resolvedStreamUrl.includes('/api/download/sample/')
+              ? resolvedStreamUrl.slice(resolvedStreamUrl.indexOf('/api/download/sample/'))
+              : resolvedStreamUrl;
+
+            const streamUrl = isDirectLocalSample
+              ? directSamplePath
               : `/api/download/stream?url=${encodeURIComponent(resolvedStreamUrl)}&fallbackUrl=${encodeURIComponent(targetUrl)}&start=${currentOffset}&end=${endByte}`;
 
             const headers: Record<string, string> = {};
-            if (isLocalSample) {
+            if (isDirectLocalSample) {
               headers['Range'] = `bytes=${currentOffset}-${endByte}`;
             }
 
@@ -621,11 +631,21 @@ export async function startRealMultiThreadDownload(params: {
         try {
           // Resume from chunkDone[0] (never reset to 0!)
           const resumeOffset = chunkDone[0];
-          const streamUrl = isLocalSample
+          const isDirectLocalSample =
+            isLocalSample ||
+            resolvedStreamUrl.startsWith('/api/download/sample/') ||
+            resolvedStreamUrl.includes('/api/download/sample/');
+          const directSamplePath = isLocalSample
             ? targetUrl
+            : resolvedStreamUrl.includes('/api/download/sample/')
+            ? resolvedStreamUrl.slice(resolvedStreamUrl.indexOf('/api/download/sample/'))
+            : resolvedStreamUrl;
+
+          const streamUrl = isDirectLocalSample
+            ? directSamplePath
             : `/api/download/stream?url=${encodeURIComponent(resolvedStreamUrl)}&fallbackUrl=${encodeURIComponent(targetUrl)}&start=${resumeOffset}`;
           const headers: Record<string, string> = {};
-          if (isLocalSample && resumeOffset > 0) {
+          if (isDirectLocalSample && resumeOffset > 0) {
             headers['Range'] = `bytes=${resumeOffset}-`;
           }
           const response = await fetch(streamUrl, { headers, signal: ac.signal });
