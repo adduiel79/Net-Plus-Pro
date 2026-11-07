@@ -14,6 +14,7 @@ export interface NativeDownloadUpdatePayload {
 }
 
 interface NetPlusNativeDownloaderBridge {
+  getClipboardText?: () => string;
   hasStoragePermission?: () => boolean;
   requestStoragePermission?: () => void;
   requestBatteryOptimizationBypass?: () => void;
@@ -38,6 +39,33 @@ declare global {
     __onStoragePermissionChanged?: (granted: boolean) => void;
     __onNativeNetworkStateChanged?: (online: boolean) => void;
   }
+}
+
+/**
+ * Reads copied text from Android Native ClipboardManager first, then falls back to Web Clipboard API.
+ */
+export async function readSystemClipboardText(): Promise<string> {
+  if (typeof window !== 'undefined' && window.NetPlusNativeDownloader?.getClipboardText) {
+    try {
+      const nativeClip = window.NetPlusNativeDownloader.getClipboardText();
+      if (nativeClip && nativeClip.trim()) {
+        return nativeClip.trim();
+      }
+    } catch {
+      // ignore and try web clipboard
+    }
+  }
+  if (typeof navigator !== 'undefined' && navigator.clipboard?.readText) {
+    try {
+      const webClip = await navigator.clipboard.readText();
+      if (webClip && webClip.trim()) {
+        return webClip.trim();
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return '';
 }
 
 export function checkNativeStoragePermission(): boolean {

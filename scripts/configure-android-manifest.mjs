@@ -117,6 +117,8 @@ if (fs.existsSync(mainActivityDir)) {
 
 import android.Manifest;
 import android.app.AlertDialog;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -166,6 +168,7 @@ public class MainActivity extends BridgeActivity {
     private final AtomicBoolean isNetworkAvailable = new AtomicBoolean(true);
     private boolean promptedStorageThisSession = false;
     private String pendingInterceptedUrl = null;
+    private volatile String cachedClipboardText = "";
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -187,8 +190,34 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onResume() {
         super.onResume();
+        refreshClipboardCache();
         notifyPermissionStateToJs();
         wakeUpWaitingDownloads();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {
+            refreshClipboardCache();
+        }
+    }
+
+    private String refreshClipboardCache() {
+        try {
+            ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+            if (cm != null && cm.hasPrimaryClip()) {
+                ClipData clip = cm.getPrimaryClip();
+                if (clip != null && clip.getItemCount() > 0) {
+                    CharSequence text = clip.getItemAt(0).coerceToText(this);
+                    if (text != null && text.length() > 0) {
+                        cachedClipboardText = text.toString().trim();
+                        return cachedClipboardText;
+                    }
+                }
+            }
+        } catch (Exception ignored) {}
+        return cachedClipboardText;
     }
 
     @Override
@@ -439,6 +468,21 @@ public class MainActivity extends BridgeActivity {
     }
 
     public class NativeDownloadBridge {
+        @JavascriptInterface
+        public String getClipboardText() {
+            final String[] result = new String[]{ cachedClipboardText };
+            try {
+                String direct = refreshClipboardCache();
+                if (direct != null && !direct.isEmpty()) {
+                    return direct;
+                }
+                runOnUiThread(() -> {
+                    result[0] = refreshClipboardCache();
+                });
+            } catch (Exception ignored) {}
+            return result[0] != null ? result[0] : "";
+        }
+
         @JavascriptInterface
         public boolean hasStoragePermission() {
             return checkHasStoragePermissionInternal();

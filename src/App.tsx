@@ -536,9 +536,9 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col">
+    <div className="min-h-screen bg-slate-100/80 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col">
       {/* 3-Zone Top Bar Contract */}
-      <header className="sticky top-0 z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 px-6 py-3.5 flex items-center justify-between gap-8">
+      <header className="sticky top-0 z-30 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 px-6 py-3.5 flex items-center justify-between gap-8 shadow-xs">
         {/* Zone 1: Single text element wordmark */}
         <a
           href="#top"
@@ -546,12 +546,12 @@ export default function App() {
             e.preventDefault();
             setActiveSection('all');
           }}
-          className="text-lg font-bold tracking-tight text-slate-900 dark:text-slate-100 whitespace-nowrap shrink-0"
+          className="text-lg font-extrabold tracking-tight text-blue-600 dark:text-blue-400 whitespace-nowrap shrink-0"
         >
           Net Plus Pro
         </a>
 
-        {/* Zone 2: 5 concise single-line navigation links */}
+        {/* Zone 2: 5 concise single-line navigation links (Turbo Downloader FIRST before Speed Test) */}
         <nav
           aria-label="প্রধান নেভিগেশন"
           className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600 dark:text-slate-300"
@@ -561,7 +561,7 @@ export default function App() {
             onClick={() => setActiveSection('all')}
             className={`hover:text-blue-600 dark:hover:text-blue-400 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               activeSection === 'all'
-                ? 'text-blue-600 dark:text-blue-400 font-semibold underline underline-offset-8'
+                ? 'text-blue-600 dark:text-blue-400 font-bold underline underline-offset-8'
                 : ''
             }`}
           >
@@ -569,21 +569,10 @@ export default function App() {
           </button>
           <button
             type="button"
-            onClick={() => setActiveSection('speedtest')}
-            className={`hover:text-blue-600 dark:hover:text-blue-400 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-              activeSection === 'speedtest'
-                ? 'text-blue-600 dark:text-blue-400 font-semibold underline underline-offset-8'
-                : ''
-            }`}
-          >
-            Speed Test (MB/s)
-          </button>
-          <button
-            type="button"
             onClick={() => setActiveSection('downloads')}
             className={`hover:text-blue-600 dark:hover:text-blue-400 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               activeSection === 'downloads'
-                ? 'text-blue-600 dark:text-blue-400 font-semibold underline underline-offset-8'
+                ? 'text-blue-600 dark:text-blue-400 font-bold underline underline-offset-8'
                 : ''
             }`}
           >
@@ -591,10 +580,21 @@ export default function App() {
           </button>
           <button
             type="button"
+            onClick={() => setActiveSection('speedtest')}
+            className={`hover:text-blue-600 dark:hover:text-blue-400 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              activeSection === 'speedtest'
+                ? 'text-blue-600 dark:text-blue-400 font-bold underline underline-offset-8'
+                : ''
+            }`}
+          >
+            Speed Test (MB/s)
+          </button>
+          <button
+            type="button"
             onClick={() => setActiveSection('service')}
             className={`hover:text-blue-600 dark:hover:text-blue-400 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               activeSection === 'service'
-                ? 'text-blue-600 dark:text-blue-400 font-semibold underline underline-offset-8'
+                ? 'text-blue-600 dark:text-blue-400 font-bold underline underline-offset-8'
                 : ''
             }`}
           >
@@ -605,7 +605,7 @@ export default function App() {
             onClick={() => setActiveSection('developer')}
             className={`hover:text-blue-600 dark:hover:text-blue-400 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               activeSection === 'developer'
-                ? 'text-blue-600 dark:text-blue-400 font-semibold underline underline-offset-8'
+                ? 'text-blue-600 dark:text-blue-400 font-bold underline underline-offset-8'
                 : ''
             }`}
           >
@@ -639,9 +639,9 @@ export default function App() {
       {/* Main Content Container */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6 space-y-6">
         {/* Top Summary Strip with Official Net Plus Pro Logo */}
-        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+        <div className="bg-white dark:bg-slate-900 border border-slate-200/90 dark:border-slate-800 rounded-3xl p-5 sm:p-6 shadow-xs flex flex-col lg:flex-row lg:items-center justify-between gap-5">
           <div className="flex items-center gap-4">
-            <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-full overflow-hidden border-2 border-blue-600 dark:border-blue-500 bg-slate-900 shrink-0 flex items-center justify-center">
+            <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-2xl overflow-hidden border-2 border-blue-600 dark:border-blue-500 bg-slate-900 shrink-0 flex items-center justify-center shadow-sm">
               <img
                 src="/assets/aistudio/file_000000008b70821197eef6b1e7f14a65_b0bafffc.png"
                 alt="Net Plus Pro Official Logo"
@@ -650,32 +650,35 @@ export default function App() {
               />
             </div>
             <div>
-              <div className="text-xs font-medium text-slate-500 dark:text-slate-400">
+              <div className="text-xs font-semibold text-blue-600 dark:text-blue-400">
                 <span>ডেভেলপার: মোঃ জুয়েল</span>
                 <span className="mx-1.5" aria-hidden="true">·</span>
                 <span>মোবাইল ও WhatsApp: ০১৬৩৩৩৬৪৪৮৭</span>
                 <span className="mx-1.5" aria-hidden="true">·</span>
-                <span>512KB RAM-Buffered 32-Thread Turbo Engine</span>
+                <span>512KB RAM-Buffered 32-Thread Engine</span>
               </div>
-              <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900 dark:text-slate-100 mt-1">
-                Net Plus Pro — রিয়েল হাই-স্পিড টার্বো ডাউনলোডার ও Speed Test
+              <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-slate-900 dark:text-slate-100 mt-1">
+                Net Plus Pro — হাই-স্পিড ডাইরেক্ট ডাউনলোডার ও Speed Test
               </h1>
+              <p className="text-xs sm:text-sm text-slate-500 dark:text-slate-400 mt-0.5">
+                লিংক পেস্ট করে ডাউনলোড বাটনে ক্লিক করলেই সরাসরি ডাউনলোড শুরু হবে এবং পাশে রিয়েল-টাইমে কত মিনিট ও সেকেন্ড বাকি তা দেখাবে।
+              </p>
             </div>
           </div>
 
           {/* 3 Key Status Indicators */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 shrink-0">
-            <div className="px-3.5 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200/80 dark:border-slate-800">
+            <div className="px-3.5 py-2.5 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-200/80 dark:border-slate-800">
               <div className="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
                 <InfinityIcon className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
-                <span>টার্বো বুস্ট ও রিট্রাই</span>
+                <span>টার্বো স্পিড ও রিজিউম</span>
               </div>
               <div className="text-xs font-bold text-slate-900 dark:text-slate-100 mt-0.5 font-mono">
                 5x Speed · ∞ Auto-Resume
               </div>
             </div>
 
-            <div className="px-3.5 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200/80 dark:border-slate-800">
+            <div className="px-3.5 py-2.5 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-200/80 dark:border-slate-800">
               <div className="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
                 <Zap className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
                 <span>সেভ লোকেশন</span>
@@ -685,7 +688,7 @@ export default function App() {
               </div>
             </div>
 
-            <div className="px-3.5 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200/80 dark:border-slate-800">
+            <div className="px-3.5 py-2.5 rounded-2xl bg-slate-50 dark:bg-slate-950 border border-slate-200/80 dark:border-slate-800">
               <div className="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
                 <Radio className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
                 <span>নেটওয়ার্ক সার্ভিস</span>
@@ -697,14 +700,14 @@ export default function App() {
           </div>
         </div>
 
-        {/* Mobile Segmented Filter Bar */}
-        <div className="flex md:hidden items-center gap-1 p-1 bg-slate-200/70 dark:bg-slate-900 rounded-xl overflow-x-auto">
+        {/* Mobile Segmented Filter Bar (Turbo Downloader FIRST before Speed Test) */}
+        <div className="flex md:hidden items-center gap-1 p-1.5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl overflow-x-auto">
           <button
             type="button"
             onClick={() => setActiveSection('all')}
-            className={`px-3 py-2 text-xs font-semibold rounded-lg whitespace-nowrap shrink-0 ${
+            className={`px-3.5 py-2 text-xs font-bold rounded-xl whitespace-nowrap shrink-0 ${
               activeSection === 'all'
-                ? 'bg-white dark:bg-slate-800 text-blue-600 dark:text-blue-400'
+                ? 'bg-blue-600 text-white'
                 : 'text-slate-600 dark:text-slate-400'
             }`}
           >
@@ -712,21 +715,10 @@ export default function App() {
           </button>
           <button
             type="button"
-            onClick={() => setActiveSection('speedtest')}
-            className={`px-3 py-2 text-xs font-semibold rounded-lg whitespace-nowrap shrink-0 ${
-              activeSection === 'speedtest'
-                ? 'bg-white dark:bg-slate-800 text-blue-600 dark:text-blue-400'
-                : 'text-slate-600 dark:text-slate-400'
-            }`}
-          >
-            Speed Test (MB/s)
-          </button>
-          <button
-            type="button"
             onClick={() => setActiveSection('downloads')}
-            className={`px-3 py-2 text-xs font-semibold rounded-lg whitespace-nowrap shrink-0 ${
+            className={`px-3.5 py-2 text-xs font-bold rounded-xl whitespace-nowrap shrink-0 ${
               activeSection === 'downloads'
-                ? 'bg-white dark:bg-slate-800 text-blue-600 dark:text-blue-400'
+                ? 'bg-blue-600 text-white'
                 : 'text-slate-600 dark:text-slate-400'
             }`}
           >
@@ -734,10 +726,21 @@ export default function App() {
           </button>
           <button
             type="button"
+            onClick={() => setActiveSection('speedtest')}
+            className={`px-3.5 py-2 text-xs font-bold rounded-xl whitespace-nowrap shrink-0 ${
+              activeSection === 'speedtest'
+                ? 'bg-blue-600 text-white'
+                : 'text-slate-600 dark:text-slate-400'
+            }`}
+          >
+            Speed Test (MB/s)
+          </button>
+          <button
+            type="button"
             onClick={() => setActiveSection('service')}
-            className={`px-3 py-2 text-xs font-semibold rounded-lg whitespace-nowrap shrink-0 ${
+            className={`px-3.5 py-2 text-xs font-bold rounded-xl whitespace-nowrap shrink-0 ${
               activeSection === 'service'
-                ? 'bg-white dark:bg-slate-800 text-blue-600 dark:text-blue-400'
+                ? 'bg-blue-600 text-white'
                 : 'text-slate-600 dark:text-slate-400'
             }`}
           >
@@ -746,9 +749,9 @@ export default function App() {
           <button
             type="button"
             onClick={() => setActiveSection('developer')}
-            className={`px-3 py-2 text-xs font-semibold rounded-lg whitespace-nowrap shrink-0 ${
+            className={`px-3.5 py-2 text-xs font-bold rounded-xl whitespace-nowrap shrink-0 ${
               activeSection === 'developer'
-                ? 'bg-white dark:bg-slate-800 text-blue-600 dark:text-blue-400'
+                ? 'bg-blue-600 text-white'
                 : 'text-slate-600 dark:text-slate-400'
             }`}
           >
@@ -756,24 +759,7 @@ export default function App() {
           </button>
         </div>
 
-        {/* Section 1: Real Speed Test Suite (Download MB/s, Upload MB/s, Ping, Jitter) */}
-        {(activeSection === 'all' || activeSection === 'speedtest') && (
-          <SpeedTestPanel
-            networkConnected={networkConnected}
-            networkTransport={networkTransport}
-            history={speedHistory}
-            onCompleteTest={(record) => {
-              setSpeedHistory((prev) => [record, ...prev]);
-              appendNetworkLog(
-                'SPEED_TEST',
-                `Ping: ${record.pingMs}ms | Jitter: ${record.jitterMs}ms | DL: ${record.downloadMBps.toFixed(2)} MB/s | UL: ${record.uploadMBps.toFixed(2)} MB/s`
-              );
-            }}
-            onClearHistory={() => setSpeedHistory([])}
-          />
-        )}
-
-        {/* Section 2: Real High-Speed Multi-Thread Download Manager (Saves to Internal Storage) */}
+        {/* Section 1 (PRIMARY): Real High-Speed Multi-Thread Download Manager (Placed BEFORE Speed Test) */}
         {(activeSection === 'all' || activeSection === 'downloads') && (
           <DownloadManagerPanel
             tasks={downloads}
@@ -794,8 +780,8 @@ export default function App() {
                 appendNetworkLog(
                   'BROWSER_INTERCEPTOR',
                   next
-                    ? 'Chrome ও সকল ব্রাউজার ডাউনলোড লিংক অটো-অপশন চালু করা হয়েছে'
-                    : 'ব্রাউজার অটো-অপশন বন্ধ করা হয়েছে'
+                    ? 'Chrome ও সকল ব্রাউজার ডাউনলোড লিংক অটো-ইন্টিগ্রেশন চালু করা হয়েছে'
+                    : 'ব্রাউজার অটো-ইন্টিগ্রেশন বন্ধ করা হয়েছে'
                 );
                 return next;
               });
@@ -816,6 +802,23 @@ export default function App() {
             onTogglePauseTask={handleTogglePauseTask}
             onRemoveTask={handleRemoveTask}
             onForceInstantStartTask={handleForceInstantStartTask}
+          />
+        )}
+
+        {/* Section 2: Real Speed Test Suite (Download MB/s, Upload MB/s, Ping, Jitter) */}
+        {(activeSection === 'all' || activeSection === 'speedtest') && (
+          <SpeedTestPanel
+            networkConnected={networkConnected}
+            networkTransport={networkTransport}
+            history={speedHistory}
+            onCompleteTest={(record) => {
+              setSpeedHistory((prev) => [record, ...prev]);
+              appendNetworkLog(
+                'SPEED_TEST',
+                `Ping: ${record.pingMs}ms | Jitter: ${record.jitterMs}ms | DL: ${record.downloadMBps.toFixed(2)} MB/s | UL: ${record.uploadMBps.toFixed(2)} MB/s`
+              );
+            }}
+            onClearHistory={() => setSpeedHistory([])}
           />
         )}
 

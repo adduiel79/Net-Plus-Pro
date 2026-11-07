@@ -8,6 +8,7 @@ import {
   computeDownloadStartDelayMs,
   isNewerVersion,
   validateDownloadUrl,
+  formatRemainingTimeBn,
 } from './networkEngine';
 
 test('calculatePingAndJitter computes accurate Ping and Jitter from RTT samples', () => {
@@ -71,4 +72,10 @@ test('validateDownloadUrl validates HTTP/HTTPS URLs and extracts filenames', () 
   const longUrlRes = validateDownloadUrl(`https://doc-0s-4g-docs.googleusercontent.com/docs/securesc/${hugeToken}`);
   assert.equal(longUrlRes.valid, true);
   assert.ok(longUrlRes.fileName.length <= 55, `Expected <= 55 chars, got ${longUrlRes.fileName.length}: ${longUrlRes.fileName}`);
+});
+
+test('formatRemainingTimeBn formats seconds into minutes and seconds in Bengali', () => {
+  assert.equal(formatRemainingTimeBn(45), '০ মিনিট 45 সেকেন্ড বাকি');
+  assert.equal(formatRemainingTimeBn(135), '2 মিনিট 15 সেকেন্ড বাকি');
+  assert.equal(formatRemainingTimeBn(3665), '1 ঘণ্টা 1 মিনিট 5 সেকেন্ড বাকি');
 });

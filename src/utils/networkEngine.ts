@@ -366,3 +366,24 @@ export function formatBytes(bytes: number): string {
   const val = bytes / Math.pow(1024, i);
   return `${val.toFixed(i >= 2 ? 1 : 0)} ${units[i]}`;
 }
+
+/**
+ * Formats remaining download seconds into a clear Bengali real-time string showing minutes & seconds.
+ */
+export function formatRemainingTimeBn(etaSeconds: number): string {
+  if (!Number.isFinite(etaSeconds) || etaSeconds <= 0) {
+    return '০ মিনিট ১ সেকেন্ড বাকি';
+  }
+  const totalSec = Math.max(1, Math.ceil(etaSeconds));
+  const hours = Math.floor(totalSec / 3600);
+  const minutes = Math.floor((totalSec % 3600) / 60);
+  const seconds = totalSec % 60;
+
+  if (hours > 0) {
+    return `${hours} ঘণ্টা ${minutes} মিনিট ${seconds} সেকেন্ড বাকি`;
+  }
+  if (minutes > 0) {
+    return `${minutes} মিনিট ${seconds} সেকেন্ড বাকি`;
+  }
+  return `০ মিনিট ${seconds} সেকেন্ড বাকি`;
+}
