@@ -1,6 +1,6 @@
 {
-  "appId": "com.netpulse.pro",
-  "appName": "NetPulse Pro",
+  "appId": "com.netplus.pro",
+  "appName": "Net Plus Pro",
   "webDir": "dist",
   "bundledWebRuntime": false,
   "server": {

@@ -1,4 +1,4 @@
-name: Build Android APK (NetPulse Pro)
+name: Build Android APK (Net Plus Pro)
 
 on:
   push:
@@ -21,7 +21,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: 'npm'
 
       - name: Setup Java JDK 21 for Android Gradle
         uses: actions/setup-java@v4
@@ -31,12 +30,12 @@ jobs:
 
       - name: Install Dependencies & Build Web Bundle
         run: |
-          npm install
+          node scripts/prepare-ci-build.mjs
+          npm install --legacy-peer-deps
           npm run build
 
       - name: Generate & Sync Native Android Project (Capacitor)
         run: |
-          npm install --no-save @capacitor/core @capacitor/cli @capacitor/android
           if [ ! -d "android" ]; then
             npx cap add android
           fi
@@ -51,12 +50,12 @@ jobs:
 
       - name: Prepare Named APK Output
         run: |
-          cp android/app/build/outputs/apk/debug/app-debug.apk ./NetPulse-Pro-Android.apk
+          cp android/app/build/outputs/apk/debug/app-debug.apk ./Net-Plus-Pro-Android.apk
 
       - name: Upload Android APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: NetPulse-Pro-Android-APK
-          path: ./NetPulse-Pro-Android.apk
+          name: Net-Plus-Pro-Android-APK
+          path: ./Net-Plus-Pro-Android.apk
           if-no-files-found: error
           retention-days: 30

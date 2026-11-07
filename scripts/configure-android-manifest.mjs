@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -74,7 +75,7 @@ if (fs.existsSync(manifestPath)) {
             </intent-filter>
 
             <!-- Share Link to Net Plus Pro from Chrome menu -->
-            <intent-filter android:label="Net Plus Pro দিয়ে ডাউনলোড করুন">
+            <intent-filter android:label="Net Plus Pro Turbo Download">
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="text/plain" />
@@ -88,7 +89,7 @@ if (fs.existsSync(manifestPath)) {
   console.log('Successfully injected Net Plus Pro permissions & Browser Download Interceptor into AndroidManifest.xml');
 }
 
-// Copy the custom Net Plus Pro logo into Android mipmap launcher icon directories
+// Resize and copy the custom Net Plus Pro logo into Android mipmap launcher icon directories
 const logoPath = path.join(
   process.cwd(),
   'public',
@@ -98,21 +99,38 @@ const logoPath = path.join(
 );
 const resDir = path.join(process.cwd(), 'android', 'app', 'src', 'main', 'res');
 
+function copyOrResizeIcon(src, dest, sizePx) {
+  try {
+    execFileSync('convert', [src, '-resize', `${sizePx}x${sizePx}`, dest], { stdio: 'ignore' });
+    return;
+  } catch {
+    // Fallback to ffmpeg if ImageMagick convert is not available
+  }
+  try {
+    execFileSync('ffmpeg', ['-y', '-i', src, '-vf', `scale=${sizePx}:${sizePx}`, dest], { stdio: 'ignore' });
+    return;
+  } catch {
+    // Fallback to direct copy
+    fs.copyFileSync(src, dest);
+  }
+}
+
 if (fs.existsSync(logoPath) && fs.existsSync(resDir)) {
-  const mipmapDirs = [
-    'mipmap-mdpi',
-    'mipmap-hdpi',
-    'mipmap-xhdpi',
-    'mipmap-xxhdpi',
-    'mipmap-xxxhdpi',
+  const mipmapSpecs = [
+    { dir: 'mipmap-mdpi', launcher: 48, foreground: 108 },
+    { dir: 'mipmap-hdpi', launcher: 72, foreground: 162 },
+    { dir: 'mipmap-xhdpi', launcher: 96, foreground: 216 },
+    { dir: 'mipmap-xxhdpi', launcher: 144, foreground: 324 },
+    { dir: 'mipmap-xxxhdpi', launcher: 192, foreground: 432 },
   ];
-  for (const dir of mipmapDirs) {
-    const targetDir = path.join(resDir, dir);
+
+  for (const spec of mipmapSpecs) {
+    const targetDir = path.join(resDir, spec.dir);
     if (fs.existsSync(targetDir)) {
-      fs.copyFileSync(logoPath, path.join(targetDir, 'ic_launcher.png'));
-      fs.copyFileSync(logoPath, path.join(targetDir, 'ic_launcher_round.png'));
-      fs.copyFileSync(logoPath, path.join(targetDir, 'ic_launcher_foreground.png'));
+      copyOrResizeIcon(logoPath, path.join(targetDir, 'ic_launcher.png'), spec.launcher);
+      copyOrResizeIcon(logoPath, path.join(targetDir, 'ic_launcher_round.png'), spec.launcher);
+      copyOrResizeIcon(logoPath, path.join(targetDir, 'ic_launcher_foreground.png'), spec.foreground);
     }
   }
-  console.log('Successfully configured Net Plus Pro custom launcher icon for Android APK.');
+  console.log('Successfully configured Net Plus Pro custom launcher icons for Android APK.');
 }
