@@ -9,6 +9,7 @@ import {
   isNewerVersion,
   validateDownloadUrl,
   formatRemainingTimeBn,
+  computeResumedProgressState,
 } from './networkEngine';
 
 test('calculatePingAndJitter computes accurate Ping and Jitter from RTT samples', () => {
@@ -79,3 +80,14 @@ test('formatRemainingTimeBn formats seconds into minutes and seconds in Bengali'
   assert.equal(formatRemainingTimeBn(135), '2 মিনিট 15 সেকেন্ড বাকি');
   assert.equal(formatRemainingTimeBn(3665), '1 ঘণ্টা 1 মিনিট 5 সেকেন্ড বাকি');
 });
+
+test('computeResumedProgressState preserves downloaded bytes and chunk progress across network drops', () => {
+  const afterDrop = computeResumedProgressState(15728640, 0, [50, 60, 40, 55], [0]);
+  assert.equal(afterDrop.downloadedBytes, 15728640);
+  assert.deepEqual(afterDrop.chunkProgress, [50, 60, 40, 55]);
+
+  const afterResume = computeResumedProgressState(15728640, 20971520, [50, 60, 40, 55], [68, 75, 58, 70]);
+  assert.equal(afterResume.downloadedBytes, 20971520);
+  assert.deepEqual(afterResume.chunkProgress, [68, 75, 58, 70]);
+});
+

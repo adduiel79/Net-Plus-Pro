@@ -150,8 +150,10 @@ import java.io.RandomAccessFile;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -164,8 +166,10 @@ public class MainActivity extends BridgeActivity {
     private final ExecutorService downloadPool = Executors.newCachedThreadPool();
     private final Map<String, AtomicBoolean> pausedTasks = new ConcurrentHashMap<>();
     private final Map<String, AtomicBoolean> cancelledTasks = new ConcurrentHashMap<>();
+    private final Map<String, Set<HttpURLConnection>> activeTaskConnections = new ConcurrentHashMap<>();
     private final Object stateLock = new Object();
     private final AtomicBoolean isNetworkAvailable = new AtomicBoolean(true);
+    private final AtomicBoolean isSimulatedOnline = new AtomicBoolean(true);
     private boolean promptedStorageThisSession = false;
     private String pendingInterceptedUrl = null;
     private volatile String cachedClipboardText = "";
@@ -233,6 +237,95 @@ public class MainActivity extends BridgeActivity {
         }
     }
 
+    private void registerActiveConnection(String taskId, HttpURLConnection conn) {
+        if (conn == null) return;
+        Set<HttpURLConnection> set = activeTaskConnections.get(taskId);
+        if (set != null) {
+            set.add(conn);
+        }
+    }
+
+    private void unregisterActiveConnection(String taskId, HttpURLConnection conn) {
+        if (conn == null) return;
+        Set<HttpURLConnection> set = activeTaskConnections.get(taskId);
+        if (set != null) {
+            set.remove(conn);
+        }
+    }
+
+    private void abortTaskConnections(String taskId) {
+        Set<HttpURLConnection> set = activeTaskConnections.get(taskId);
+        if (set == null) return;
+        for (HttpURLConnection conn : set.toArray(new HttpURLConnection[0])) {
+            downloadPool.submit(() -> {
+                try {
+                    if (conn != null) conn.disconnect();
+                } catch (Exception ignored) {}
+            });
+        }
+    }
+
+    private void abortAllActiveConnections() {
+        for (String taskId : activeTaskConnections.keySet()) {
+            abortTaskConnections(taskId);
+        }
+    }
+
+    /**
+     * Opens an HttpURLConnection that manually follows up to 10 redirects (including http <-> https
+     * and cross-domain CDN redirects) while strictly preserving the HTTP Range header on every hop!
+     * If primaryUrl fails (e.g. expired signed CDN URL after IP change on network reconnect),
+     * it automatically re-resolves from fallbackOriginalUrl with the exact same Range header.
+     */
+    private HttpURLConnection openRangeConnectionWithRedirects(
+            String primaryUrl,
+            String fallbackOriginalUrl,
+            String rangeHeader
+    ) throws Exception {
+        try {
+            return openSingleRedirectChain(primaryUrl, rangeHeader);
+        } catch (Exception firstEx) {
+            if (fallbackOriginalUrl != null && !fallbackOriginalUrl.isEmpty() && !fallbackOriginalUrl.equals(primaryUrl)) {
+                return openSingleRedirectChain(fallbackOriginalUrl, rangeHeader);
+            }
+            throw firstEx;
+        }
+    }
+
+    private HttpURLConnection openSingleRedirectChain(String startUrl, String rangeHeader) throws Exception {
+        String currentUrl = startUrl;
+        for (int hop = 0; hop < 10; hop++) {
+            HttpURLConnection conn = (HttpURLConnection) new URL(currentUrl).openConnection();
+            conn.setInstanceFollowRedirects(false);
+            conn.setUseCaches(false);
+            conn.setConnectTimeout(10000);
+            conn.setReadTimeout(12000);
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 15) Chrome/131.0.0.0 Mobile NetPlusPro/2.5");
+            conn.setRequestProperty("Accept-Encoding", "identity");
+            conn.setRequestProperty("Connection", "keep-alive");
+            if (rangeHeader != null && !rangeHeader.isEmpty()) {
+                conn.setRequestProperty("Range", rangeHeader);
+            }
+
+            int code = conn.getResponseCode();
+            if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308) {
+                String location = conn.getHeaderField("Location");
+                conn.disconnect();
+                if (location == null || location.isEmpty()) {
+                    throw new Exception("Redirect missing Location header");
+                }
+                currentUrl = new URL(new URL(currentUrl), location).toString();
+                continue;
+            }
+            if (code >= 400) {
+                conn.disconnect();
+                throw new Exception("HTTP " + code);
+            }
+            return conn;
+        }
+        throw new Exception("Too many redirects");
+    }
+
     private void registerRealTimeNetworkMonitor() {
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
@@ -248,6 +341,9 @@ public class MainActivity extends BridgeActivity {
                     @Override
                     public void onLost(Network network) {
                         isNetworkAvailable.set(false);
+                        // Immediately close dead sockets so workers flush RAM buffers to disk and wait cleanly
+                        abortAllActiveConnections();
+                        wakeUpWaitingDownloads();
                         notifyNetworkStateToJs(false);
                     }
                 });
@@ -256,6 +352,7 @@ public class MainActivity extends BridgeActivity {
     }
 
     private boolean isCurrentlyOnline() {
+        if (!isSimulatedOnline.get()) return false;
         try {
             ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
             if (cm == null) return true;
@@ -515,11 +612,21 @@ public class MainActivity extends BridgeActivity {
         }
 
         @JavascriptInterface
+        public void setSimulatedNetworkState(boolean online) {
+            isSimulatedOnline.set(online);
+            if (!online) {
+                abortAllActiveConnections();
+            }
+            wakeUpWaitingDownloads();
+        }
+
+        @JavascriptInterface
         public void pauseDownload(String taskId) {
             AtomicBoolean flag = pausedTasks.get(taskId);
             if (flag != null) {
                 flag.set(true);
             }
+            abortTaskConnections(taskId);
             wakeUpWaitingDownloads();
         }
 
@@ -538,6 +645,7 @@ public class MainActivity extends BridgeActivity {
             if (flag != null) {
                 flag.set(true);
             }
+            abortTaskConnections(taskId);
             wakeUpWaitingDownloads();
         }
 
@@ -569,6 +677,7 @@ public class MainActivity extends BridgeActivity {
         public void startMultiThreadDownload(final String taskId, final String urlStr, final String requestedName, final int threadCount) {
             pausedTasks.put(taskId, new AtomicBoolean(false));
             cancelledTasks.put(taskId, new AtomicBoolean(false));
+            activeTaskConnections.put(taskId, Collections.newSetFromMap(new ConcurrentHashMap<>()));
 
             downloadPool.submit(() -> {
                 final AtomicInteger retryCounter = new AtomicInteger(0);
@@ -578,11 +687,11 @@ public class MainActivity extends BridgeActivity {
                 String contentDisposition = null;
                 String contentType = null;
 
-                // 1. Resilient Probe Loop: Automatically waits & retries if internet is off
+                // 1. Resilient Probe Loop with manual redirect preservation
                 while (!cancelledTasks.get(taskId).get()) {
                     while (pausedTasks.get(taskId).get() && !cancelledTasks.get(taskId).get()) {
                         synchronized (stateLock) {
-                            try { stateLock.wait(300); } catch (InterruptedException ignored) {}
+                            try { stateLock.wait(250); } catch (InterruptedException ignored) {}
                         }
                     }
                     if (cancelledTasks.get(taskId).get()) return;
@@ -590,22 +699,15 @@ public class MainActivity extends BridgeActivity {
                     if (!isCurrentlyOnline()) {
                         emitProgress(taskId, requestedName, 0, 0, 0.0, new long[]{0}, new long[]{1}, "waiting_network", "", "", retryCounter.incrementAndGet());
                         synchronized (stateLock) {
-                            try { stateLock.wait(1200); } catch (InterruptedException ignored) {}
+                            try { stateLock.wait(900); } catch (InterruptedException ignored) {}
                         }
                         continue;
                     }
 
                     HttpURLConnection probeConn = null;
                     try {
-                        probeConn = (HttpURLConnection) new URL(urlStr).openConnection();
-                        probeConn.setInstanceFollowRedirects(true);
-                        probeConn.setUseCaches(false);
-                        probeConn.setConnectTimeout(12000);
-                        probeConn.setReadTimeout(15000);
-                        probeConn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 15) Chrome/131.0.0.0 Mobile NetPlusPro/2.5");
-                        probeConn.setRequestProperty("Accept-Encoding", "identity");
-                        probeConn.setRequestProperty("Connection", "keep-alive");
-                        probeConn.setRequestProperty("Range", "bytes=0-0");
+                        probeConn = openRangeConnectionWithRedirects(urlStr, urlStr, "bytes=0-0");
+                        registerActiveConnection(taskId, probeConn);
 
                         int status = probeConn.getResponseCode();
                         finalUrl = probeConn.getURL().toString();
@@ -630,9 +732,10 @@ public class MainActivity extends BridgeActivity {
                     } catch (Exception probeEx) {
                         emitProgress(taskId, requestedName, 0, 0, 0.0, new long[]{0}, new long[]{1}, "waiting_network", "", "", retryCounter.incrementAndGet());
                         synchronized (stateLock) {
-                            try { stateLock.wait(1500); } catch (InterruptedException ignored) {}
+                            try { stateLock.wait(1000); } catch (InterruptedException ignored) {}
                         }
                     } finally {
+                        unregisterActiveConnection(taskId, probeConn);
                         if (probeConn != null) probeConn.disconnect();
                     }
                 }
@@ -671,7 +774,6 @@ public class MainActivity extends BridgeActivity {
                     final long[] chunkSize = new long[activeThreads];
                     final AtomicBoolean anyWorkerWaitingNetwork = new AtomicBoolean(false);
 
-                    // Rolling window speed tracker so pauses or initial connect never lower MB/s speed
                     long lastTickMs = System.currentTimeMillis();
                     long lastTickBytes = 0;
                     double rollingSpeedMBps = 0.0;
@@ -687,16 +789,14 @@ public class MainActivity extends BridgeActivity {
                             chunkSize[idx] = endByte - startByte + 1;
 
                             futures[i] = downloadPool.submit(() -> {
-                                // Use a 512 KB per-thread RAM write buffer to eliminate Android FUSE IPC bottleneck!
                                 final int FLUSH_THRESHOLD = 512 * 1024;
                                 byte[] ramWriteBuffer = new byte[FLUSH_THRESHOLD + 131072];
                                 byte[] netReadBuffer = new byte[128 * 1024];
 
                                 while (chunkDone[idx] < chunkSize[idx] && !cancelledTasks.get(taskId).get()) {
-                                    // If paused, wait cleanly until resumed
                                     while (pausedTasks.get(taskId).get() && !cancelledTasks.get(taskId).get()) {
                                         synchronized (stateLock) {
-                                            try { stateLock.wait(250); } catch (InterruptedException ignored) {}
+                                            try { stateLock.wait(200); } catch (InterruptedException ignored) {}
                                         }
                                     }
                                     if (cancelledTasks.get(taskId).get()) return;
@@ -705,7 +805,7 @@ public class MainActivity extends BridgeActivity {
                                         anyWorkerWaitingNetwork.set(true);
                                         retryCounter.incrementAndGet();
                                         synchronized (stateLock) {
-                                            try { stateLock.wait(1200); } catch (InterruptedException ignored) {}
+                                            try { stateLock.wait(800); } catch (InterruptedException ignored) {}
                                         }
                                         continue;
                                     }
@@ -714,64 +814,80 @@ public class MainActivity extends BridgeActivity {
                                     int bufferedCount = 0;
                                     long writeStartOffset = startByte + chunkDone[idx];
 
-                                    try {
+                                    try (RandomAccessFile partFile = new RandomAccessFile(targetFile, "rw")) {
+                                        // Resume from the exact byte offset where this thread stopped!
                                         long currentOffset = startByte + chunkDone[idx];
-                                        partConn = (HttpURLConnection) new URL(resolvedUrl).openConnection();
-                                        partConn.setInstanceFollowRedirects(true);
-                                        partConn.setUseCaches(false);
-                                        partConn.setConnectTimeout(12000);
-                                        partConn.setReadTimeout(15000);
-                                        partConn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 15) Chrome/131.0.0.0 Mobile NetPlusPro/2.5");
-                                        partConn.setRequestProperty("Accept-Encoding", "identity");
-                                        partConn.setRequestProperty("Connection", "keep-alive");
-                                        partConn.setRequestProperty("Range", "bytes=" + currentOffset + "-" + endByte);
+                                        writeStartOffset = currentOffset;
+
+                                        partConn = openRangeConnectionWithRedirects(
+                                            resolvedUrl,
+                                            urlStr,
+                                            "bytes=" + currentOffset + "-" + endByte
+                                        );
+                                        registerActiveConnection(taskId, partConn);
 
                                         int code = partConn.getResponseCode();
                                         if (code != 206 && code != 200) {
                                             throw new Exception("HTTP " + code);
                                         }
-                                        // If server ignored Range header on thread > 0, abort secondary thread
-                                        if (code == 200 && idx > 0) {
-                                            chunkDone[idx] = chunkSize[idx];
-                                            return;
-                                        }
+
+                                        // If server ignored Range header and sent 200 from byte 0, skip up to currentOffset instead of resetting!
+                                        long bytesToSkipFromStream = (code == 200) ? currentOffset : 0;
 
                                         anyWorkerWaitingNetwork.set(false);
 
-                                        try (InputStream is = new BufferedInputStream(partConn.getInputStream(), 256 * 1024);
-                                             RandomAccessFile partFile = new RandomAccessFile(targetFile, "rw")) {
-                                            writeStartOffset = startByte + chunkDone[idx];
+                                        try (InputStream is = new BufferedInputStream(partConn.getInputStream(), 256 * 1024)) {
                                             int read;
                                             while ((read = is.read(netReadBuffer)) != -1) {
                                                 if (cancelledTasks.get(taskId).get()) return;
+                                                if (read <= 0) continue;
 
-                                                long remainingNeeded = chunkSize[idx] - chunkDone[idx];
-                                                int bytesToTake = (int) Math.min((long) read, remainingNeeded);
+                                                int sliceOffset = 0;
+                                                int sliceLen = read;
+                                                if (bytesToSkipFromStream > 0) {
+                                                    if (read <= bytesToSkipFromStream) {
+                                                        bytesToSkipFromStream -= read;
+                                                        continue;
+                                                    }
+                                                    sliceOffset = (int) bytesToSkipFromStream;
+                                                    sliceLen = read - sliceOffset;
+                                                    bytesToSkipFromStream = 0;
+                                                }
+
+                                                long remainingNeeded = chunkSize[idx] - (chunkDone[idx] + bufferedCount);
+                                                int bytesToTake = (int) Math.min((long) sliceLen, remainingNeeded);
                                                 if (bytesToTake <= 0) break;
 
-                                                System.arraycopy(netReadBuffer, 0, ramWriteBuffer, bufferedCount, bytesToTake);
+                                                System.arraycopy(netReadBuffer, sliceOffset, ramWriteBuffer, bufferedCount, bytesToTake);
                                                 bufferedCount += bytesToTake;
-                                                chunkDone[idx] += bytesToTake;
-                                                downloadedBytes.addAndGet(bytesToTake);
 
-                                                // Flush in large 512 KB blocks or when pausing/finishing
-                                                if (bufferedCount >= FLUSH_THRESHOLD || pausedTasks.get(taskId).get() || chunkDone[idx] >= chunkSize[idx]) {
+                                                // Flush to disk in 512 KB blocks or when pausing/finishing/disconnecting
+                                                if (
+                                                    bufferedCount >= FLUSH_THRESHOLD ||
+                                                    pausedTasks.get(taskId).get() ||
+                                                    !isCurrentlyOnline() ||
+                                                    (chunkDone[idx] + bufferedCount) >= chunkSize[idx]
+                                                ) {
                                                     partFile.seek(writeStartOffset);
                                                     partFile.write(ramWriteBuffer, 0, bufferedCount);
                                                     writeStartOffset += bufferedCount;
+                                                    chunkDone[idx] += bufferedCount;
+                                                    downloadedBytes.addAndGet(bufferedCount);
                                                     bufferedCount = 0;
                                                 }
 
-                                                // If user pressed Pause, break out after flushing so connection closes cleanly
-                                                if (pausedTasks.get(taskId).get()) {
+                                                if (pausedTasks.get(taskId).get() || !isCurrentlyOnline() || chunkDone[idx] >= chunkSize[idx]) {
                                                     break;
                                                 }
                                             }
-
-                                            if (bufferedCount > 0) {
+                                        } finally {
+                                            // CRITICAL: Always flush any remaining bytes in ramWriteBuffer to disk even if is.read() threw IOException on network disconnect!
+                                            if (bufferedCount > 0 && !cancelledTasks.get(taskId).get()) {
                                                 partFile.seek(writeStartOffset);
                                                 partFile.write(ramWriteBuffer, 0, bufferedCount);
                                                 writeStartOffset += bufferedCount;
+                                                chunkDone[idx] += bufferedCount;
+                                                downloadedBytes.addAndGet(bufferedCount);
                                                 bufferedCount = 0;
                                             }
                                         }
@@ -779,9 +895,10 @@ public class MainActivity extends BridgeActivity {
                                         anyWorkerWaitingNetwork.set(true);
                                         retryCounter.incrementAndGet();
                                         synchronized (stateLock) {
-                                            try { stateLock.wait(1000); } catch (InterruptedException ignored) {}
+                                            try { stateLock.wait(800); } catch (InterruptedException ignored) {}
                                         }
                                     } finally {
+                                        unregisterActiveConnection(taskId, partConn);
                                         if (partConn != null) partConn.disconnect();
                                     }
                                 }
@@ -825,13 +942,13 @@ public class MainActivity extends BridgeActivity {
                             try { Thread.sleep(200); } catch (InterruptedException ignored) {}
                         }
                     } else {
-                        // Single-stream resilient range-resume fallback
+                        // Single-stream resilient range-resume fallback (NEVER resets downloadedBytes to 0!)
                         byte[] netReadBuffer = new byte[128 * 1024];
                         while (!cancelledTasks.get(taskId).get()) {
                             while (pausedTasks.get(taskId).get() && !cancelledTasks.get(taskId).get()) {
                                 emitProgress(taskId, targetFile.getName(), downloadedBytes.get(), finalTotalBytes > 0 ? finalTotalBytes : downloadedBytes.get(), 0.0, chunkDone, chunkSize, "paused", targetFile.getAbsolutePath(), "", retryCounter.get());
                                 synchronized (stateLock) {
-                                    try { stateLock.wait(250); } catch (InterruptedException ignored) {}
+                                    try { stateLock.wait(200); } catch (InterruptedException ignored) {}
                                 }
                             }
                             if (cancelledTasks.get(taskId).get()) return;
@@ -839,39 +956,43 @@ public class MainActivity extends BridgeActivity {
                             if (!isCurrentlyOnline()) {
                                 emitProgress(taskId, targetFile.getName(), downloadedBytes.get(), finalTotalBytes > 0 ? finalTotalBytes : downloadedBytes.get(), 0.0, chunkDone, chunkSize, "waiting_network", targetFile.getAbsolutePath(), "", retryCounter.incrementAndGet());
                                 synchronized (stateLock) {
-                                    try { stateLock.wait(1200); } catch (InterruptedException ignored) {}
+                                    try { stateLock.wait(800); } catch (InterruptedException ignored) {}
                                 }
                                 continue;
                             }
 
                             HttpURLConnection conn = null;
-                            try {
+                            try (RandomAccessFile raf = new RandomAccessFile(targetFile, "rw")) {
                                 long currentOffset = downloadedBytes.get();
-                                conn = (HttpURLConnection) new URL(resolvedUrl).openConnection();
-                                conn.setInstanceFollowRedirects(true);
-                                conn.setUseCaches(false);
-                                conn.setConnectTimeout(12000);
-                                conn.setReadTimeout(15000);
-                                conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 15) Chrome/131.0.0.0 Mobile NetPlusPro/2.5");
-                                conn.setRequestProperty("Accept-Encoding", "identity");
-                                if (currentOffset > 0) {
-                                    conn.setRequestProperty("Range", "bytes=" + currentOffset + "-");
-                                }
+                                String rangeReq = currentOffset > 0 ? ("bytes=" + currentOffset + "-") : null;
+                                conn = openRangeConnectionWithRedirects(resolvedUrl, urlStr, rangeReq);
+                                registerActiveConnection(taskId, conn);
 
                                 int respCode = conn.getResponseCode();
-                                boolean appendMode = (respCode == 206 && currentOffset > 0);
-                                if (!appendMode && currentOffset > 0) {
-                                    downloadedBytes.set(0);
-                                    currentOffset = 0;
-                                }
+                                // If server ignored Range and returned 200 OK from byte 0, fast-forward/skip currentOffset bytes instead of resetting to 0!
+                                long bytesToSkip = (respCode == 200 && currentOffset > 0) ? currentOffset : 0;
+                                raf.seek(currentOffset);
 
-                                try (InputStream is = new BufferedInputStream(conn.getInputStream(), 256 * 1024);
-                                     FileOutputStream fos = new FileOutputStream(targetFile, appendMode)) {
+                                try (InputStream is = new BufferedInputStream(conn.getInputStream(), 256 * 1024)) {
                                     int read;
                                     while ((read = is.read(netReadBuffer)) != -1) {
                                         if (cancelledTasks.get(taskId).get()) return;
-                                        fos.write(netReadBuffer, 0, read);
-                                        long curr = downloadedBytes.addAndGet(read);
+                                        if (read <= 0) continue;
+
+                                        int offset = 0;
+                                        int len = read;
+                                        if (bytesToSkip > 0) {
+                                            if (read <= bytesToSkip) {
+                                                bytesToSkip -= read;
+                                                continue;
+                                            }
+                                            offset = (int) bytesToSkip;
+                                            len = read - offset;
+                                            bytesToSkip = 0;
+                                        }
+
+                                        raf.write(netReadBuffer, offset, len);
+                                        long curr = downloadedBytes.addAndGet(len);
                                         chunkDone[0] = curr;
                                         chunkSize[0] = finalTotalBytes > 0 ? finalTotalBytes : curr;
 
@@ -887,23 +1008,27 @@ public class MainActivity extends BridgeActivity {
                                             emitProgress(taskId, targetFile.getName(), curr, finalTotalBytes > 0 ? finalTotalBytes : curr, rollingSpeedMBps, chunkDone, chunkSize, "downloading", targetFile.getAbsolutePath(), "", retryCounter.get());
                                         }
 
-                                        if (pausedTasks.get(taskId).get()) {
-                                            fos.flush();
+                                        if (pausedTasks.get(taskId).get() || !isCurrentlyOnline()) {
                                             break;
                                         }
                                     }
-                                    fos.flush();
                                 }
 
-                                if (!pausedTasks.get(taskId).get() && (finalTotalBytes <= 0 || downloadedBytes.get() >= finalTotalBytes)) {
+                                if (
+                                    !pausedTasks.get(taskId).get() &&
+                                    isCurrentlyOnline() &&
+                                    ((finalTotalBytes > 0 && downloadedBytes.get() >= finalTotalBytes) ||
+                                     (finalTotalBytes <= 0 && downloadedBytes.get() > 0))
+                                ) {
                                     break;
                                 }
                             } catch (Exception e) {
                                 emitProgress(taskId, targetFile.getName(), downloadedBytes.get(), finalTotalBytes > 0 ? finalTotalBytes : downloadedBytes.get(), 0.0, chunkDone, chunkSize, "waiting_network", targetFile.getAbsolutePath(), "", retryCounter.incrementAndGet());
                                 synchronized (stateLock) {
-                                    try { stateLock.wait(1200); } catch (InterruptedException ignored) {}
+                                    try { stateLock.wait(900); } catch (InterruptedException ignored) {}
                                 }
                             } finally {
+                                unregisterActiveConnection(taskId, conn);
                                 if (conn != null) conn.disconnect();
                             }
                         }
@@ -921,6 +1046,8 @@ public class MainActivity extends BridgeActivity {
                     }
                 } catch (Exception e) {
                     emitProgress(taskId, "", 0, 0, 0.0, new long[]{0}, new long[]{1}, "error", "", e.getMessage() != null ? e.getMessage() : "Download error", retryCounter.get());
+                } finally {
+                    activeTaskConnections.remove(taskId);
                 }
             });
         }

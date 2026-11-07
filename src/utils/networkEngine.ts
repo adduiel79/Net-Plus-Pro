@@ -387,3 +387,32 @@ export function formatRemainingTimeBn(etaSeconds: number): string {
   }
   return `০ মিনিট ${seconds} সেকেন্ড বাকি`;
 }
+
+/**
+ * Ensures that when network disconnects and reconnects, downloaded bytes and per-chunk
+ * progress strictly resume from the highest recorded byte offset and never reset to 0.
+ */
+export function computeResumedProgressState(
+  previousDownloadedBytes: number,
+  incomingDownloadedBytes: number,
+  previousChunks?: number[],
+  incomingChunks?: number[]
+): { downloadedBytes: number; chunkProgress: number[] } {
+  const safePrev = Math.max(0, Number.isFinite(previousDownloadedBytes) ? previousDownloadedBytes : 0);
+  const safeNext = Math.max(0, Number.isFinite(incomingDownloadedBytes) ? incomingDownloadedBytes : 0);
+  const downloadedBytes = Math.max(safePrev, safeNext);
+
+  const prevArr = Array.isArray(previousChunks) ? previousChunks : [];
+  const nextArr = Array.isArray(incomingChunks) ? incomingChunks : [];
+  const len = Math.max(prevArr.length, nextArr.length);
+  const chunkProgress: number[] = [];
+
+  for (let i = 0; i < len; i++) {
+    const p = prevArr[i] ?? 0;
+    const n = nextArr[i] ?? 0;
+    chunkProgress.push(Math.min(100, Math.max(p, n)));
+  }
+
+  return { downloadedBytes, chunkProgress };
+}
+

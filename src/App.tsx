@@ -13,6 +13,7 @@ import {
   validateDownloadUrl,
   computeDownloadStartDelayMs,
   calculateTurboSpeedComparison,
+  computeResumedProgressState,
 } from './utils/networkEngine';
 import {
   startRealMultiThreadDownload,
@@ -189,14 +190,20 @@ export default function App() {
                   t.status === 'paused'
                     ? 'paused'
                     : status || 'downloading';
+                const resumed = computeResumedProgressState(
+                  t.downloadedBytes,
+                  downloadedBytes,
+                  t.chunkProgress,
+                  chunkProgress
+                );
                 return {
                   ...t,
                   fileName: fileName || t.fileName,
-                  downloadedBytes,
+                  downloadedBytes: resumed.downloadedBytes,
                   totalBytes: totalBytes > 0 ? totalBytes : t.totalBytes,
                   speedMBps: nextStatus === 'paused' || nextStatus === 'waiting_network' ? 0 : speedMBps,
                   etaSeconds,
-                  chunkProgress,
+                  chunkProgress: resumed.chunkProgress,
                   retryCount,
                   savedPath: savedPath || t.savedPath,
                   status: nextStatus,

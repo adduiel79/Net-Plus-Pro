@@ -147,6 +147,7 @@ async function startServer() {
         method: 'GET',
         headers: {
           Range: 'bytes=0-0',
+          'Accept-Encoding': 'identity',
           'User-Agent':
             'Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36 NetPlusPro/2.5',
         },
@@ -182,6 +183,11 @@ async function startServer() {
         }
       } else if (contentLengthHeader) {
         totalBytes = parseInt(contentLengthHeader, 10) || 0;
+      }
+
+      // Our /api/download/stream proxy supports slicing any byte range even if upstream returns 200
+      if (totalBytes > 0) {
+        acceptRanges = true;
       }
 
       // Extract filename from Content-Disposition or final redirected URL
@@ -234,9 +240,10 @@ async function startServer() {
     }
   });
 
-  // 6. Real Multi-Thread Byte-Range Proxy Stream Endpoint (streams real file chunks to client)
+  // 6. Real Multi-Thread Byte-Range Proxy Stream Endpoint (streams real file chunks to client & guarantees resume from exact byte offset)
   app.get('/api/download/stream', async (req, res) => {
     const rawUrl = String(req.query.url || '').trim();
+    const fallbackUrl = String(req.query.fallbackUrl || '').trim();
     if (!rawUrl) {
       res.status(400).send('Missing url parameter');
       return;
@@ -251,15 +258,17 @@ async function startServer() {
 
       const start = req.query.start !== undefined ? parseInt(String(req.query.start), 10) : undefined;
       const end = req.query.end !== undefined ? parseInt(String(req.query.end), 10) : undefined;
+      const hasValidStart = start !== undefined && !Number.isNaN(start) && start >= 0;
+      const hasValidEnd = end !== undefined && !Number.isNaN(end) && end >= 0;
 
       const headers: Record<string, string> = {
+        'Accept-Encoding': 'identity',
         'User-Agent':
           'Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36 NetPlusPro/2.5',
       };
 
-      if (start !== undefined && !Number.isNaN(start)) {
-        headers['Range'] =
-          end !== undefined && !Number.isNaN(end) ? `bytes=${start}-${end}` : `bytes=${start}-`;
+      if (hasValidStart) {
+        headers['Range'] = hasValidEnd ? `bytes=${start}-${end}` : `bytes=${start}-`;
       } else if (req.headers.range) {
         headers['Range'] = String(req.headers.range);
       }
@@ -269,24 +278,46 @@ async function startServer() {
         abortController.abort();
       });
 
-      const upstream = await fetch(rawUrl, {
+      let upstream = await fetch(rawUrl, {
         method: 'GET',
         headers,
         redirect: 'follow',
         signal: abortController.signal,
       });
 
-      res.status(upstream.status);
+      // If signed redirect URL expired after a network disconnect, automatically re-resolve via fallbackUrl
+      if (
+        !upstream.ok &&
+        upstream.status !== 206 &&
+        fallbackUrl &&
+        fallbackUrl !== rawUrl &&
+        (fallbackUrl.startsWith('http://') || fallbackUrl.startsWith('https://'))
+      ) {
+        upstream = await fetch(fallbackUrl, {
+          method: 'GET',
+          headers,
+          redirect: 'follow',
+          signal: abortController.signal,
+        });
+      }
+
+      const upstreamIgnoredRange = hasValidStart && start > 0 && upstream.status === 200;
+      res.status(upstreamIgnoredRange ? 206 : upstream.status);
+
       const forwardHeaders = [
         'content-type',
-        'content-length',
-        'content-range',
         'accept-ranges',
         'content-disposition',
       ];
       for (const h of forwardHeaders) {
         const val = upstream.headers.get(h);
         if (val) res.setHeader(h, val);
+      }
+      if (!upstreamIgnoredRange) {
+        const cl = upstream.headers.get('content-length');
+        const cr = upstream.headers.get('content-range');
+        if (cl) res.setHeader('content-length', cl);
+        if (cr) res.setHeader('content-range', cr);
       }
       res.setHeader('Cache-Control', 'no-store');
 
@@ -296,15 +327,45 @@ async function startServer() {
       }
 
       const reader = upstream.body.getReader();
-      while (true) {
+      let bytesToSkip = upstreamIgnoredRange ? start : 0;
+      let maxBytesToSend =
+        hasValidStart && hasValidEnd && end >= start
+          ? end - start + 1
+          : Number.POSITIVE_INFINITY;
+      let bytesSent = 0;
+
+      while (bytesSent < maxBytesToSend) {
         const { done, value } = await reader.read();
         if (done) break;
-        if (value) {
-          const canContinue = res.write(Buffer.from(value));
+        if (!value || value.byteLength === 0) continue;
+
+        let chunk = value;
+        if (bytesToSkip > 0) {
+          if (chunk.byteLength <= bytesToSkip) {
+            bytesToSkip -= chunk.byteLength;
+            continue;
+          }
+          chunk = chunk.subarray(bytesToSkip);
+          bytesToSkip = 0;
+        }
+
+        const remainingAllowed = maxBytesToSend - bytesSent;
+        if (chunk.byteLength > remainingAllowed) {
+          chunk = chunk.subarray(0, remainingAllowed);
+        }
+
+        if (chunk.byteLength > 0) {
+          bytesSent += chunk.byteLength;
+          const canContinue = res.write(Buffer.from(chunk));
           if (!canContinue) {
             await new Promise<void>((resolve) => res.once('drain', resolve));
           }
         }
+      }
+      try {
+        await reader.cancel();
+      } catch {
+        // ignore
       }
       res.end();
     } catch (err) {

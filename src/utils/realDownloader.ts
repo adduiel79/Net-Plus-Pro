@@ -19,6 +19,7 @@ interface NetPlusNativeDownloaderBridge {
   requestStoragePermission?: () => void;
   requestBatteryOptimizationBypass?: () => void;
   consumePendingInterceptedUrl?: () => string;
+  setSimulatedNetworkState?: (online: boolean) => void;
   startMultiThreadDownload: (
     taskId: string,
     url: string,
@@ -167,6 +168,13 @@ function waitForSignalOrTimeout(ctrl: ActiveTaskControl, ms: number): Promise<vo
 
 export function setGlobalDownloaderNetworkState(online: boolean): void {
   simulatedNetworkOnline = online;
+  if (typeof window !== 'undefined' && window.NetPlusNativeDownloader?.setSimulatedNetworkState) {
+    try {
+      window.NetPlusNativeDownloader.setSimulatedNetworkState(online);
+    } catch {
+      // ignore
+    }
+  }
   for (const ctrl of activeControls.values()) {
     if (!online) {
       for (const ac of ctrl.abortControllers) {
@@ -348,6 +356,7 @@ export async function startRealMultiThreadDownload(params: {
 
   try {
     const isLocalSample = targetUrl.startsWith('/api/download/sample/');
+    let resolvedStreamUrl = targetUrl;
     let fileName = safeInitialName;
     let totalBytes = 0;
     let acceptRanges = false;
@@ -374,27 +383,33 @@ export async function startRealMultiThreadDownload(params: {
           savedPath: `/storage/emulated/0/Download/${fileName}`,
           status: 'waiting_network',
         });
-        await waitForSignalOrTimeout(control, 1000);
+        await waitForSignalOrTimeout(control, 800);
         continue;
       }
 
       try {
         if (isLocalSample) {
           const headRes = await fetch(targetUrl, { method: 'HEAD' });
+          if (!headRes.ok) {
+            throw new Error(`Probe HTTP ${headRes.status}`);
+          }
           totalBytes = parseInt(headRes.headers.get('content-length') || '0', 10) || 0;
-          acceptRanges = (headRes.headers.get('accept-ranges') || '').includes('bytes');
+          acceptRanges = (headRes.headers.get('accept-ranges') || '').includes('bytes') || totalBytes > 0;
           contentType = headRes.headers.get('content-type') || 'application/octet-stream';
         } else {
           const probeRes = await fetch(`/api/download/probe?url=${encodeURIComponent(targetUrl)}`);
-          if (probeRes.ok) {
-            const meta = await probeRes.json();
-            if (meta.ok) {
-              contentType = meta.contentType || 'application/octet-stream';
-              fileName = sanitizeAndShortenFileName(meta.fileName || safeInitialName, contentType);
-              totalBytes = Number(meta.totalBytes) || 0;
-              acceptRanges = Boolean(meta.acceptRanges);
-            }
+          if (!probeRes.ok) {
+            throw new Error(`Probe HTTP ${probeRes.status}`);
           }
+          const meta = await probeRes.json();
+          if (!meta.ok) {
+            throw new Error(meta.error || 'Probe failed');
+          }
+          resolvedStreamUrl = meta.url || targetUrl;
+          contentType = meta.contentType || 'application/octet-stream';
+          fileName = sanitizeAndShortenFileName(meta.fileName || safeInitialName, contentType);
+          totalBytes = Number(meta.totalBytes) || 0;
+          acceptRanges = Boolean(meta.acceptRanges) || totalBytes > 0;
         }
         break;
       } catch (probeErr) {
@@ -413,7 +428,7 @@ export async function startRealMultiThreadDownload(params: {
           savedPath: `/storage/emulated/0/Download/${fileName}`,
           status: 'waiting_network',
         });
-        await waitForSignalOrTimeout(control, 1200);
+        await waitForSignalOrTimeout(control, 1000);
       }
     }
 
@@ -504,17 +519,18 @@ export async function startRealMultiThreadDownload(params: {
         while (chunkDone[idx] < chunkTotal[idx] && !control.cancelled) {
           while (control.paused && !control.cancelled) {
             emitProgress(true, 'paused');
-            await waitForSignalOrTimeout(control, 300);
+            await waitForSignalOrTimeout(control, 250);
           }
           if (control.cancelled) return;
 
           if (!simulatedNetworkOnline || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
             retryCount += 1;
             emitProgress(true, 'waiting_network');
-            await waitForSignalOrTimeout(control, 1000);
+            await waitForSignalOrTimeout(control, 800);
             continue;
           }
 
+          // Resume from the exact byte offset where this chunk stopped!
           const currentOffset = startByte + chunkDone[idx];
           const ac = new AbortController();
           control.abortControllers.add(ac);
@@ -522,7 +538,7 @@ export async function startRealMultiThreadDownload(params: {
           try {
             const streamUrl = isLocalSample
               ? targetUrl
-              : `/api/download/stream?url=${encodeURIComponent(targetUrl)}&start=${currentOffset}&end=${endByte}`;
+              : `/api/download/stream?url=${encodeURIComponent(resolvedStreamUrl)}&fallbackUrl=${encodeURIComponent(targetUrl)}&start=${currentOffset}&end=${endByte}`;
 
             const headers: Record<string, string> = {};
             if (isLocalSample) {
@@ -541,10 +557,14 @@ export async function startRealMultiThreadDownload(params: {
 
             if (!response.body) {
               const buf = new Uint8Array(await response.arrayBuffer());
-              chunkBuffers[idx].push(buf);
-              chunkDone[idx] += buf.byteLength;
-              totalDownloaded += buf.byteLength;
-              emitProgress(true, 'downloading');
+              const needed = chunkTotal[idx] - chunkDone[idx];
+              const slice = buf.byteLength > needed ? buf.subarray(0, needed) : buf;
+              if (slice.byteLength > 0) {
+                chunkBuffers[idx].push(slice);
+                chunkDone[idx] += slice.byteLength;
+                totalDownloaded += slice.byteLength;
+                emitProgress(true, 'downloading');
+              }
               break;
             }
 
@@ -572,7 +592,7 @@ export async function startRealMultiThreadDownload(params: {
               throw err;
             }
             emitProgress(true, 'waiting_network');
-            await waitForSignalOrTimeout(control, 900);
+            await waitForSignalOrTimeout(control, 800);
           } finally {
             control.abortControllers.delete(ac);
           }
@@ -585,26 +605,28 @@ export async function startRealMultiThreadDownload(params: {
       while (!control.cancelled) {
         while (control.paused && !control.cancelled) {
           emitProgress(true, 'paused');
-          await waitForSignalOrTimeout(control, 300);
+          await waitForSignalOrTimeout(control, 250);
         }
         if (control.cancelled) return;
 
         if (!simulatedNetworkOnline || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
           retryCount += 1;
           emitProgress(true, 'waiting_network');
-          await waitForSignalOrTimeout(control, 1000);
+          await waitForSignalOrTimeout(control, 800);
           continue;
         }
 
         const ac = new AbortController();
         control.abortControllers.add(ac);
         try {
+          // Resume from chunkDone[0] (never reset to 0!)
+          const resumeOffset = chunkDone[0];
           const streamUrl = isLocalSample
             ? targetUrl
-            : `/api/download/stream?url=${encodeURIComponent(targetUrl)}&start=${chunkDone[0]}`;
+            : `/api/download/stream?url=${encodeURIComponent(resolvedStreamUrl)}&fallbackUrl=${encodeURIComponent(targetUrl)}&start=${resumeOffset}`;
           const headers: Record<string, string> = {};
-          if (isLocalSample && chunkDone[0] > 0) {
-            headers['Range'] = `bytes=${chunkDone[0]}-`;
+          if (isLocalSample && resumeOffset > 0) {
+            headers['Range'] = `bytes=${resumeOffset}-`;
           }
           const response = await fetch(streamUrl, { headers, signal: ac.signal });
           if (!response.ok && response.status !== 206) {
@@ -628,7 +650,12 @@ export async function startRealMultiThreadDownload(params: {
               emitProgress(false, 'downloading');
             }
           }
-          if (!control.paused && simulatedNetworkOnline && (totalBytes <= 0 || totalDownloaded >= totalBytes)) {
+          if (
+            !control.paused &&
+            simulatedNetworkOnline &&
+            ((totalBytes > 0 && totalDownloaded >= totalBytes) ||
+              (totalBytes <= 0 && totalDownloaded > 0))
+          ) {
             break;
           }
         } catch (err) {
@@ -639,7 +666,7 @@ export async function startRealMultiThreadDownload(params: {
             throw err;
           }
           emitProgress(true, 'waiting_network');
-          await waitForSignalOrTimeout(control, 1000);
+          await waitForSignalOrTimeout(control, 800);
         } finally {
           control.abortControllers.delete(ac);
         }
