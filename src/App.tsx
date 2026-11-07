@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Sun, Moon, Smartphone, Zap, Infinity as InfinityIcon, Radio } from 'lucide-react';
 import {
   SpeedTestRecord,
@@ -14,6 +14,11 @@ import {
   computeDownloadStartDelayMs,
   calculateTurboSpeedComparison,
 } from './utils/networkEngine';
+import {
+  startRealMultiThreadDownload,
+  setRealDownloadPaused,
+  cancelRealDownload,
+} from './utils/realDownloader';
 import { SpeedTestPanel } from './components/SpeedTestPanel';
 import { DownloadManagerPanel } from './components/DownloadManagerPanel';
 import { ServiceAndUpdatePanel } from './components/ServiceAndUpdatePanel';
@@ -44,77 +49,14 @@ const INITIAL_SPEED_HISTORY: SpeedTestRecord[] = [
   },
 ];
 
-const INITIAL_DOWNLOADS: DownloadTask[] = [
-  {
-    id: 'dl-1',
-    fileName: 'android-15-system-image-arm64.zip',
-    url: 'https://dl.google.com/android/repository/sys-img/android-15-arm64-v8a.zip',
-    totalBytes: 420 * 1024 * 1024,
-    downloadedBytes: 248 * 1024 * 1024,
-    speedMBps: 24.8,
-    browserBaselineMBps: 4.6,
-    speedMultiplier: 5.4,
-    status: 'downloading',
-    retryCount: 2,
-    unlimitedRetry: true,
-    instantStartEnabled: true,
-    startLatencyMs: 0,
-    threads: 16,
-    etaSeconds: 7,
-    addedAt: '১০:৪০ AM',
-    checksumSha256: '8f9d2a7c...e41b',
-    sourceBrowser: 'Google Chrome -> Net Plus Pro Turbo',
-  },
-  {
-    id: 'dl-2',
-    fileName: 'bangladesh-offline-routing-v4.pak',
-    url: 'https://mirror.bdix.net/maps/bangladesh-offline-routing-v4.pak',
-    totalBytes: 165 * 1024 * 1024,
-    downloadedBytes: 18 * 1024 * 1024,
-    speedMBps: 0,
-    browserBaselineMBps: 4.6,
-    speedMultiplier: 4.8,
-    status: 'queued_doze',
-    retryCount: 0,
-    unlimitedRetry: true,
-    instantStartEnabled: false,
-    startLatencyMs: 14500,
-    threads: 16,
-    etaSeconds: 10,
-    addedAt: '১০:৪৩ AM',
-    checksumSha256: '3c11b09e...90a2',
-    sourceBrowser: 'Chrome Custom Tab',
-  },
-  {
-    id: 'dl-3',
-    fileName: 'netpulse-core-codecs-arm64.apk',
-    url: 'https://cdn.netpulse.app/releases/netpulse-core-codecs-arm64.apk',
-    totalBytes: 64 * 1024 * 1024,
-    downloadedBytes: 64 * 1024 * 1024,
-    speedMBps: 0,
-    browserBaselineMBps: 4.5,
-    speedMultiplier: 4.8,
-    status: 'completed',
-    retryCount: 1,
-    unlimitedRetry: true,
-    instantStartEnabled: true,
-    startLatencyMs: 0,
-    threads: 16,
-    etaSeconds: 0,
-    addedAt: '১০:২০ AM',
-    checksumSha256: 'e74a19f0...7c11',
-    sourceBrowser: 'Google Chrome -> Net Plus Pro Turbo',
-  },
-];
-
 export default function App() {
   const [darkMode, setDarkMode] = useState<boolean>(true);
   const [activeSection, setActiveSection] = useState<
     'all' | 'speedtest' | 'downloads' | 'service' | 'developer'
   >('all');
 
-  // Core Android & Network States
-  const [batteryRestrictionDisabled, setBatteryRestrictionDisabled] = useState<boolean>(false);
+  // Core Android & Network States (batteryRestrictionDisabled = true by default for 0ms Instant Start)
+  const [batteryRestrictionDisabled, setBatteryRestrictionDisabled] = useState<boolean>(true);
   const [unlimitedRetryGlobal, setUnlimitedRetryGlobal] = useState<boolean>(true);
   const [networkConnected, setNetworkConnected] = useState<boolean>(true);
   const [networkTransport, setNetworkTransport] = useState<'Wi-Fi 6' | '5G NR' | '4G LTE' | 'Ethernet'>('Wi-Fi 6');
@@ -122,7 +64,7 @@ export default function App() {
   const [turboBoostEnabled, setTurboBoostEnabled] = useState<boolean>(true);
 
   const [speedHistory, setSpeedHistory] = useState<SpeedTestRecord[]>(INITIAL_SPEED_HISTORY);
-  const [downloads, setDownloads] = useState<DownloadTask[]>(INITIAL_DOWNLOADS);
+  const [downloads, setDownloads] = useState<DownloadTask[]>([]);
 
   const [serviceConfig, setServiceConfig] = useState<NetworkServiceConfig>({
     foregroundServiceEnabled: true,
@@ -141,8 +83,8 @@ export default function App() {
     {
       id: 'log-1',
       time: '১০:৪৪:০১',
-      event: 'TURBO_ENGINE',
-      detail: '16-32 Thread HTTP 206 Multi-Range Accelerator সক্রিয় (Chrome-এর চেয়ে 5x দ্রুত)',
+      event: 'REAL_DOWNLOADER',
+      detail: '16-32 Thread Real HTTP 206 Multi-Range ইঞ্জিন সক্রিয় (Internal Storage / Download ফোল্ডারে সেভ)',
     },
     {
       id: 'log-2',
@@ -163,11 +105,11 @@ export default function App() {
     latestVersion: 'v2.5.0-stable',
     updateAvailable: true,
     releaseDate: 'নভেম্বর ২০২৬',
-    apkSizeMb: 28.4,
-    downloadUrl: 'https://updates.netpulse.app/android/netpulse-pro-v2.5.0-stable.apk',
+    apkSizeMb: 6.0,
+    downloadUrl: '/api/download/sample/NetPlus-Pro-v2.5.0-stable.apk?sizeMB=6',
     mandatory: false,
     changelog: [
-      'Chrome বা সাধারণ ব্রাউজারের চেয়ে ৫ গুণ দ্রুত ১৬–৩২ থ্রেড টার্বো ডাউনলোড ইঞ্জিন যুক্ত',
+      'যেকোনো লিংকে ক্লিক করলে ফোনের Internal Storage (Download ফোল্ডার)-এ ১৬–৩২ থ্রেডে রিয়েল হাই-স্পিড ডাউনলোড',
       'Chrome বা অন্য যেকোনো ব্রাউজারে ডাউনলোড ক্লিক করলে Net Plus Pro অটো-অপশন পপআপ',
       'Upload Speed, Download Speed (MB/s), Ping ও Jitter-সহ ১ সেকেন্ডে রিয়েল Speed Test',
       'ডাউনলোড Retry Limit তুলে দিয়ে ∞ Unlimited Auto-Retry এবং 0ms ইনস্ট্যান্ট স্টার্ট',
@@ -188,7 +130,7 @@ export default function App() {
     }
   }, [darkMode]);
 
-  const appendNetworkLog = (event: string, detail: string) => {
+  const appendNetworkLog = useCallback((event: string, detail: string) => {
     const time = new Date().toLocaleTimeString('bn-BD', {
       hour: '2-digit',
       minute: '2-digit',
@@ -198,76 +140,193 @@ export default function App() {
       { id: `log-${Date.now()}-${Math.random()}`, time, event, detail },
       ...prev.slice(0, 19),
     ]);
-  };
+  }, []);
 
-  // Real-time progress ticker for active downloads in MB/s
-  useEffect(() => {
-    const interval = window.setInterval(() => {
-      setDownloads((prev) =>
-        prev.map((task) => {
-          if (!networkConnected) {
-            if (task.status === 'downloading') {
-              return {
-                ...task,
-                status: 'waiting_network',
-                speedMBps: 0,
-                retryCount: task.retryCount + 1,
-              };
-            }
-            if (task.status === 'waiting_network' && task.unlimitedRetry) {
-              return {
-                ...task,
-                retryCount: task.retryCount + 1,
-              };
-            }
-            return task;
-          }
-
-          if (task.status === 'waiting_network' && serviceConfig.autoResumeOnReconnect) {
-            const comp = calculateTurboSpeedComparison(
-              task.browserBaselineMBps,
-              task.threads,
-              turboBoostEnabled
+  const executeRealDownloadForTask = useCallback(
+    (taskId: string, url: string, threads: number, unlimitedRetry: boolean) => {
+      startRealMultiThreadDownload({
+        taskId,
+        url,
+        threads,
+        unlimitedRetry,
+        callbacks: {
+          onMetadata: ({ fileName, totalBytes }) => {
+            setDownloads((prev) =>
+              prev.map((t) =>
+                t.id === taskId
+                  ? {
+                      ...t,
+                      fileName: fileName || t.fileName,
+                      totalBytes: totalBytes > 0 ? totalBytes : t.totalBytes,
+                    }
+                  : t
+              )
             );
-            return {
-              ...task,
-              status: 'downloading',
-              speedMBps: comp.netPlusTurboMBps,
-              speedMultiplier: comp.multiplier,
-            };
-          }
-
-          if (task.status === 'downloading') {
-            const comp = calculateTurboSpeedComparison(
-              task.browserBaselineMBps,
-              task.threads,
-              turboBoostEnabled
+          },
+          onProgress: ({
+            downloadedBytes,
+            totalBytes,
+            speedMBps,
+            etaSeconds,
+            chunkProgress,
+            retryCount,
+          }) => {
+            setDownloads((prev) =>
+              prev.map((t) =>
+                t.id === taskId
+                  ? {
+                      ...t,
+                      downloadedBytes,
+                      totalBytes: totalBytes > 0 ? totalBytes : t.totalBytes,
+                      speedMBps,
+                      etaSeconds,
+                      chunkProgress,
+                      retryCount,
+                      status: t.status === 'paused' ? 'paused' : 'downloading',
+                    }
+                  : t
+              )
             );
-            const stepBytes = comp.netPlusTurboMBps * 1024 * 1024 * 0.9;
-            const nextBytes = Math.min(task.totalBytes, task.downloadedBytes + stepBytes);
-            const isDone = nextBytes >= task.totalBytes;
-            return {
-              ...task,
-              downloadedBytes: nextBytes,
-              speedMBps: isDone ? 0 : comp.netPlusTurboMBps,
-              speedMultiplier: comp.multiplier,
-              status: isDone ? 'completed' : 'downloading',
-              etaSeconds: isDone
-                ? 0
-                : Math.max(
-                    1,
-                    Math.round((task.totalBytes - nextBytes) / (comp.netPlusTurboMBps * 1024 * 1024))
-                  ),
-            };
-          }
+          },
+          onCompleted: ({
+            fileName,
+            totalBytes,
+            checksumSha256,
+            blobUrl,
+            savedPath,
+            averageSpeedMBps,
+          }) => {
+            setDownloads((prev) =>
+              prev.map((t) =>
+                t.id === taskId
+                  ? {
+                      ...t,
+                      fileName: fileName || t.fileName,
+                      downloadedBytes: totalBytes,
+                      totalBytes,
+                      speedMBps: averageSpeedMBps,
+                      etaSeconds: 0,
+                      status: 'completed',
+                      checksumSha256,
+                      blobUrl,
+                      savedPath,
+                      chunkProgress: Array.from({ length: Math.min(16, t.threads) }, () => 100),
+                    }
+                  : t
+              )
+            );
+            appendNetworkLog(
+              'SAVED_INTERNAL_STORAGE',
+              `${fileName} ডাউনলোড সম্পন্ন এবং ফোনের ${savedPath}-এ সেভ হয়েছে (${averageSpeedMBps} MB/s)`
+            );
+          },
+          onError: (errorMsg) => {
+            setDownloads((prev) =>
+              prev.map((t) =>
+                t.id === taskId
+                  ? {
+                      ...t,
+                      status: 'error',
+                      speedMBps: 0,
+                      errorMessage: errorMsg,
+                    }
+                  : t
+              )
+            );
+            appendNetworkLog('DOWNLOAD_ERROR', `ডাউনলোড ব্যর্থ: ${errorMsg}`);
+          },
+        },
+      });
+    },
+    [appendNetworkLog]
+  );
 
-          return task;
-        })
+  const handleAddDownload = useCallback(
+    (url: string, threads: number, sourceBrowser = 'Google Chrome') => {
+      const { fileName } = validateDownloadUrl(url);
+      const delayMs = computeDownloadStartDelayMs(
+        batteryRestrictionDisabled,
+        serviceConfig.foregroundServiceEnabled
       );
-    }, 900);
+      const comp = calculateTurboSpeedComparison(4.6, threads, turboBoostEnabled);
+      const taskId = `dl-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
-    return () => window.clearInterval(interval);
-  }, [networkConnected, serviceConfig.autoResumeOnReconnect, turboBoostEnabled]);
+      const newTask: DownloadTask = {
+        id: taskId,
+        fileName,
+        url,
+        totalBytes: 0,
+        downloadedBytes: 0,
+        speedMBps: 0,
+        browserBaselineMBps: comp.browserSingleStreamMBps,
+        speedMultiplier: comp.multiplier,
+        status: !networkConnected
+          ? 'waiting_network'
+          : batteryRestrictionDisabled
+          ? 'downloading'
+          : 'queued_doze',
+        retryCount: 0,
+        unlimitedRetry: unlimitedRetryGlobal,
+        instantStartEnabled: batteryRestrictionDisabled,
+        startLatencyMs: delayMs,
+        threads,
+        etaSeconds: 0,
+        addedAt: new Date().toLocaleTimeString('bn-BD', { hour: '2-digit', minute: '2-digit' }),
+        checksumSha256: 'Computing...',
+        sourceBrowser,
+        chunkProgress: Array.from({ length: Math.min(16, threads) }, () => 0),
+        savedPath: `/storage/emulated/0/Download/${fileName}`,
+      };
+
+      setDownloads((prev) => [newTask, ...prev]);
+      appendNetworkLog(
+        'REAL_TURBO_START',
+        `${fileName} রিয়েল মাল্টি-থ্রেড ডাউনলোড শুরু (${threads} Threads -> /storage/emulated/0/Download/)`
+      );
+
+      if (batteryRestrictionDisabled && networkConnected) {
+        executeRealDownloadForTask(taskId, url, threads, unlimitedRetryGlobal);
+      } else if (!batteryRestrictionDisabled) {
+        window.setTimeout(() => {
+          setDownloads((curr) =>
+            curr.map((t) =>
+              t.id === taskId && t.status === 'queued_doze'
+                ? { ...t, status: 'downloading' }
+                : t
+            )
+          );
+          executeRealDownloadForTask(taskId, url, threads, unlimitedRetryGlobal);
+        }, 4200);
+      }
+    },
+    [
+      batteryRestrictionDisabled,
+      serviceConfig.foregroundServiceEnabled,
+      turboBoostEnabled,
+      networkConnected,
+      unlimitedRetryGlobal,
+      appendNetworkLog,
+      executeRealDownloadForTask,
+    ]
+  );
+
+  // Listen for incoming browser links intercepted from Chrome on Android APK
+  useEffect(() => {
+    window.__onBrowserDownloadIntercepted = (interceptedUrl: string) => {
+      if (interceptedUrl) {
+        setActiveSection('downloads');
+        handleAddDownload(interceptedUrl, 16, 'Google Chrome (Auto-Intercepted)');
+      }
+    };
+
+    if (window.NetPlusNativeDownloader?.consumePendingInterceptedUrl) {
+      const pending = window.NetPlusNativeDownloader.consumePendingInterceptedUrl();
+      if (pending) {
+        setActiveSection('downloads');
+        handleAddDownload(pending, 16, 'Google Chrome (Auto-Intercepted)');
+      }
+    }
+  }, [handleAddDownload]);
 
   const handleToggleBatteryRestriction = () => {
     setBatteryRestrictionDisabled((prev) => {
@@ -276,19 +335,6 @@ export default function App() {
         appendNetworkLog(
           'BATTERY_BYPASS',
           'ব্যাটারি রেস্ট্রিকশন ডিসএবল করা হয়েছে -> 0ms ইনস্ট্যান্ট ডাউনলোড সক্রিয়'
-        );
-        setDownloads((curr) =>
-          curr.map((t) =>
-            t.status === 'queued_doze'
-              ? {
-                  ...t,
-                  status: networkConnected ? 'downloading' : 'waiting_network',
-                  instantStartEnabled: true,
-                  startLatencyMs: 0,
-                  speedMBps: networkConnected ? 24.8 : 0,
-                }
-              : { ...t, instantStartEnabled: true, startLatencyMs: 0 }
-          )
         );
       } else {
         appendNetworkLog(
@@ -330,77 +376,24 @@ export default function App() {
     });
   };
 
-  const handleAddDownload = (url: string, threads: number, sourceBrowser = 'Google Chrome') => {
-    const { fileName } = validateDownloadUrl(url);
-    const delayMs = computeDownloadStartDelayMs(
-      batteryRestrictionDisabled,
-      serviceConfig.foregroundServiceEnabled
-    );
-    const comp = calculateTurboSpeedComparison(4.6, threads, turboBoostEnabled);
-
-    const newTask: DownloadTask = {
-      id: `dl-${Date.now()}`,
-      fileName,
-      url,
-      totalBytes: 220 * 1024 * 1024,
-      downloadedBytes: batteryRestrictionDisabled ? 22 * 1024 * 1024 : 0,
-      speedMBps: batteryRestrictionDisabled && networkConnected ? comp.netPlusTurboMBps : 0,
-      browserBaselineMBps: comp.browserSingleStreamMBps,
-      speedMultiplier: comp.multiplier,
-      status: !networkConnected
-        ? 'waiting_network'
-        : batteryRestrictionDisabled
-        ? 'downloading'
-        : 'queued_doze',
-      retryCount: 0,
-      unlimitedRetry: unlimitedRetryGlobal,
-      instantStartEnabled: batteryRestrictionDisabled,
-      startLatencyMs: delayMs,
-      threads,
-      etaSeconds: 8,
-      addedAt: new Date().toLocaleTimeString('bn-BD', { hour: '2-digit', minute: '2-digit' }),
-      checksumSha256: '9a44c81d...b712',
-      sourceBrowser,
-    };
-
-    setDownloads((prev) => [newTask, ...prev]);
-    appendNetworkLog(
-      'TURBO_DOWNLOAD',
-      `${fileName} যুক্ত হয়েছে (${threads} Threads · ${comp.netPlusTurboMBps} MB/s · ${comp.multiplier}x Faster than Browser)`
-    );
-
-    if (!batteryRestrictionDisabled) {
-      window.setTimeout(() => {
-        setDownloads((curr) =>
-          curr.map((t) =>
-            t.id === newTask.id && t.status === 'queued_doze'
-              ? {
-                  ...t,
-                  status: 'downloading',
-                  speedMBps: comp.netPlusTurboMBps,
-                }
-              : t
-          )
-        );
-      }, 4200);
-    }
-  };
-
   const handleForceInstantStartTask = (id: string) => {
     setBatteryRestrictionDisabled(true);
+    const target = downloads.find((t) => t.id === id);
     setDownloads((prev) =>
       prev.map((t) =>
-        t.id === id || t.status === 'queued_doze'
+        t.id === id
           ? {
               ...t,
-              status: networkConnected ? 'downloading' : 'waiting_network',
+              status: 'downloading',
               instantStartEnabled: true,
               startLatencyMs: 0,
-              speedMBps: networkConnected ? 24.8 : 0,
             }
           : t
       )
     );
+    if (target && target.status === 'queued_doze') {
+      executeRealDownloadForTask(target.id, target.url, target.threads, target.unlimitedRetry);
+    }
     appendNetworkLog(
       'INSTANT_START',
       'ব্যাটারি রেস্ট্রিকশন ডিসএবল করে ডাউনলোড 0ms-এ ইনস্ট্যান্ট শুরু করা হয়েছে!'
@@ -411,22 +404,19 @@ export default function App() {
     setDownloads((prev) =>
       prev.map((t) => {
         if (t.id !== id) return t;
-        const nextStatus = t.status === 'paused' ? 'downloading' : 'paused';
-        const comp = calculateTurboSpeedComparison(
-          t.browserBaselineMBps,
-          t.threads,
-          turboBoostEnabled
-        );
+        const isPausing = t.status !== 'paused';
+        setRealDownloadPaused(id, isPausing);
         return {
           ...t,
-          status: nextStatus,
-          speedMBps: nextStatus === 'downloading' ? comp.netPlusTurboMBps : 0,
+          status: isPausing ? 'paused' : 'downloading',
+          speedMBps: isPausing ? 0 : t.speedMBps,
         };
       })
     );
   };
 
   const handleRemoveTask = (id: string) => {
+    cancelRealDownload(id);
     setDownloads((prev) => prev.filter((t) => t.id !== id));
   };
 
@@ -447,7 +437,7 @@ export default function App() {
     setUpdateInstalled(true);
     appendNetworkLog(
       'OTA_INSTALL',
-      `${updateInfo.latestVersion} আপডেট ডাউনলোড ও ইনস্টল সম্পন্ন হয়েছে।`
+      `${updateInfo.latestVersion} আপডেট ফাইল ডাউনলোড শুরু হয়েছে।`
     );
   };
 
@@ -571,10 +561,10 @@ export default function App() {
                 <span className="mx-1.5" aria-hidden="true">·</span>
                 <span>মোবাইল ও WhatsApp: ০১৬৩৩৩৬৪৪৮৭</span>
                 <span className="mx-1.5" aria-hidden="true">·</span>
-                <span>Chrome Auto-Download Interceptor</span>
+                <span>Internal Storage Real Multi-Thread Downloader</span>
               </div>
               <h1 className="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900 dark:text-slate-100 mt-1">
-                Net Plus Pro — 5x হাই-স্পিড টার্বো ডাউনলোডার ও রিয়েল Speed Test
+                Net Plus Pro — রিয়েল হাই-স্পিড টার্বো ডাউনলোডার ও Speed Test
               </h1>
             </div>
           </div>
@@ -594,10 +584,10 @@ export default function App() {
             <div className="px-3.5 py-2.5 rounded-xl bg-slate-50 dark:bg-slate-950 border border-slate-200/80 dark:border-slate-800">
               <div className="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
                 <Zap className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
-                <span>ব্রাউজার অটো-অপশন</span>
+                <span>সেভ লোকেশন</span>
               </div>
               <div className="text-xs font-bold text-slate-900 dark:text-slate-100 mt-0.5 font-mono">
-                {browserInterceptorEnabled ? 'Chrome Auto-Popup: ON' : 'Manual Mode'}
+                Internal Storage / Download
               </div>
             </div>
 
@@ -689,7 +679,7 @@ export default function App() {
           />
         )}
 
-        {/* Section 2: Smart Turbo Download Manager (5x High Speed + Chrome Auto-Interceptor + Unlimited Retry) */}
+        {/* Section 2: Real High-Speed Multi-Thread Download Manager (Saves to Internal Storage) */}
         {(activeSection === 'all' || activeSection === 'downloads') && (
           <DownloadManagerPanel
             tasks={downloads}

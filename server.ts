@@ -21,7 +21,7 @@ async function startServer() {
     });
   });
 
-  // 2. Real Binary Stream Download Endpoint
+  // 2. Real Binary Stream Download Endpoint for Speed Test
   const chunkPool = crypto.randomBytes(64 * 1024); // 64 KB high-entropy buffer
   app.get('/api/speedtest/download', (req, res) => {
     const requestedBytes = Math.min(
@@ -51,7 +51,7 @@ async function startServer() {
     sendNext();
   });
 
-  // 3. Real Binary Payload Upload Endpoint
+  // 3. Real Binary Payload Upload Endpoint for Speed Test
   app.post('/api/speedtest/upload', (req, res) => {
     const bodyLength = Buffer.isBuffer(req.body)
       ? req.body.length
@@ -63,6 +63,247 @@ async function startServer() {
       receivedBytes: bodyLength,
       timestamp: Date.now(),
     });
+  });
+
+  // 4. Real Multi-Range Sample File Endpoint (supports HEAD and HTTP 206 Partial Content)
+  app.use('/api/download/sample/:fileName', (req, res) => {
+    const fileName = String(req.params.fileName || 'NetPlusPro-Test-Package.apk').replace(
+      /[^a-zA-Z0-9._-]/g,
+      '_'
+    );
+    const sizeMB = Math.min(50, Math.max(1, parseInt(String(req.query.sizeMB || '8'), 10) || 8));
+    const totalBytes = sizeMB * 1024 * 1024;
+
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.setHeader('Cache-Control', 'no-store');
+
+    if (req.method === 'HEAD') {
+      res.setHeader('Content-Length', String(totalBytes));
+      res.status(200).end();
+      return;
+    }
+
+    const rangeHeader = req.headers.range;
+    let start = 0;
+    let end = totalBytes - 1;
+    let statusCode = 200;
+
+    if (rangeHeader && rangeHeader.startsWith('bytes=')) {
+      const parts = rangeHeader.replace('bytes=', '').split('-');
+      const parsedStart = parseInt(parts[0], 10);
+      const parsedEnd = parts[1] ? parseInt(parts[1], 10) : totalBytes - 1;
+      if (!Number.isNaN(parsedStart) && parsedStart >= 0 && parsedStart < totalBytes) {
+        start = parsedStart;
+        end = Math.min(totalBytes - 1, !Number.isNaN(parsedEnd) ? parsedEnd : totalBytes - 1);
+        statusCode = 206;
+        res.setHeader('Content-Range', `bytes ${start}-${end}/${totalBytes}`);
+      }
+    }
+
+    const contentLength = end - start + 1;
+    res.setHeader('Content-Length', String(contentLength));
+    res.status(statusCode);
+
+    let sent = 0;
+    const sendRange = () => {
+      while (sent < contentLength) {
+        const remaining = contentLength - sent;
+        const slice = remaining >= chunkPool.length ? chunkPool : chunkPool.subarray(0, remaining);
+        sent += slice.length;
+        const ok = res.write(slice);
+        if (!ok) {
+          res.once('drain', sendRange);
+          return;
+        }
+      }
+      res.end();
+    };
+
+    sendRange();
+  });
+
+  // 5. Real URL Metadata Probe Endpoint (bypasses browser CORS for any HTTP/HTTPS file link)
+  app.get('/api/download/probe', async (req, res) => {
+    const rawUrl = String(req.query.url || '').trim();
+    if (!rawUrl) {
+      res.status(400).json({ ok: false, error: 'URL missing' });
+      return;
+    }
+
+    try {
+      const parsed = new URL(rawUrl);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        res.status(400).json({ ok: false, error: 'Only HTTP/HTTPS URLs are supported' });
+        return;
+      }
+
+      // First try Range: bytes=0-0 to accurately detect both total size and byte-range support
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 12000);
+
+      const response = await fetch(rawUrl, {
+        method: 'GET',
+        headers: {
+          Range: 'bytes=0-0',
+          'User-Agent':
+            'Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36 NetPlusPro/2.5',
+        },
+        redirect: 'follow',
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+
+      const contentRange = response.headers.get('content-range');
+      const contentLengthHeader = response.headers.get('content-length');
+      const acceptRangesHeader = (response.headers.get('accept-ranges') || '').toLowerCase();
+      const contentType = response.headers.get('content-type') || 'application/octet-stream';
+      const contentDisposition = response.headers.get('content-disposition') || '';
+
+      // Cancel body stream immediately since we only needed headers
+      if (response.body) {
+        try {
+          await response.body.cancel();
+        } catch {
+          // ignore
+        }
+      }
+
+      let totalBytes = 0;
+      let acceptRanges = acceptRangesHeader.includes('bytes') || response.status === 206;
+
+      if (contentRange) {
+        // e.g. "bytes 0-0/45829120"
+        const match = contentRange.match(/\/(\d+)/);
+        if (match && match[1]) {
+          totalBytes = parseInt(match[1], 10) || 0;
+          acceptRanges = true;
+        }
+      } else if (contentLengthHeader) {
+        totalBytes = parseInt(contentLengthHeader, 10) || 0;
+      }
+
+      // Extract filename from Content-Disposition or final redirected URL
+      let fileName = '';
+      const cdMatch = contentDisposition.match(/filename\*?=(?:UTF-8'')?["']?([^"';\n]+)["']?/i);
+      if (cdMatch && cdMatch[1]) {
+        fileName = decodeURIComponent(cdMatch[1].trim());
+      } else {
+        const finalUrlObj = new URL(response.url || rawUrl);
+        const segs = finalUrlObj.pathname.split('/').filter(Boolean);
+        fileName = decodeURIComponent(segs[segs.length - 1] || 'downloaded-file.bin');
+      }
+
+      fileName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+      if (!fileName.includes('.')) {
+        if (contentType.includes('android.package-archive')) fileName += '.apk';
+        else if (contentType.includes('zip')) fileName += '.zip';
+        else if (contentType.includes('pdf')) fileName += '.pdf';
+        else if (contentType.includes('mp4') || contentType.includes('video')) fileName += '.mp4';
+        else if (contentType.includes('mpeg') || contentType.includes('audio')) fileName += '.mp3';
+        else if (contentType.includes('jpeg') || contentType.includes('jpg')) fileName += '.jpg';
+        else if (contentType.includes('png')) fileName += '.png';
+        else fileName += '.bin';
+      }
+
+      res.json({
+        ok: true,
+        url: response.url || rawUrl,
+        fileName,
+        totalBytes,
+        acceptRanges,
+        contentType,
+        status: response.status,
+      });
+    } catch (err) {
+      res.status(502).json({
+        ok: false,
+        error: err instanceof Error ? err.message : 'Failed to probe remote URL',
+      });
+    }
+  });
+
+  // 6. Real Multi-Thread Byte-Range Proxy Stream Endpoint (streams real file chunks to client)
+  app.get('/api/download/stream', async (req, res) => {
+    const rawUrl = String(req.query.url || '').trim();
+    if (!rawUrl) {
+      res.status(400).send('Missing url parameter');
+      return;
+    }
+
+    try {
+      const parsed = new URL(rawUrl);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+        res.status(400).send('Invalid protocol');
+        return;
+      }
+
+      const start = req.query.start !== undefined ? parseInt(String(req.query.start), 10) : undefined;
+      const end = req.query.end !== undefined ? parseInt(String(req.query.end), 10) : undefined;
+
+      const headers: Record<string, string> = {
+        'User-Agent':
+          'Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36 NetPlusPro/2.5',
+      };
+
+      if (start !== undefined && !Number.isNaN(start)) {
+        headers['Range'] =
+          end !== undefined && !Number.isNaN(end) ? `bytes=${start}-${end}` : `bytes=${start}-`;
+      } else if (req.headers.range) {
+        headers['Range'] = String(req.headers.range);
+      }
+
+      const abortController = new AbortController();
+      req.on('close', () => {
+        abortController.abort();
+      });
+
+      const upstream = await fetch(rawUrl, {
+        method: 'GET',
+        headers,
+        redirect: 'follow',
+        signal: abortController.signal,
+      });
+
+      res.status(upstream.status);
+      const forwardHeaders = [
+        'content-type',
+        'content-length',
+        'content-range',
+        'accept-ranges',
+        'content-disposition',
+      ];
+      for (const h of forwardHeaders) {
+        const val = upstream.headers.get(h);
+        if (val) res.setHeader(h, val);
+      }
+      res.setHeader('Cache-Control', 'no-store');
+
+      if (!upstream.body) {
+        res.end();
+        return;
+      }
+
+      const reader = upstream.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          const canContinue = res.write(Buffer.from(value));
+          if (!canContinue) {
+            await new Promise<void>((resolve) => res.once('drain', resolve));
+          }
+        }
+      }
+      res.end();
+    } catch (err) {
+      if (!res.headersSent) {
+        res.status(502).send(err instanceof Error ? err.message : 'Upstream download failed');
+      } else {
+        res.end();
+      }
+    }
   });
 
   // Delegate non-API traffic to Vite middleware once initialized

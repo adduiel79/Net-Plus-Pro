@@ -32,7 +32,7 @@ export interface DownloadTask {
   speedMBps: number;
   browserBaselineMBps: number;
   speedMultiplier: number;
-  status: 'downloading' | 'queued_doze' | 'paused' | 'waiting_network' | 'completed';
+  status: 'downloading' | 'queued_doze' | 'paused' | 'waiting_network' | 'completed' | 'error';
   retryCount: number;
   unlimitedRetry: boolean;
   instantStartEnabled: boolean;
@@ -42,6 +42,10 @@ export interface DownloadTask {
   addedAt: string;
   checksumSha256: string;
   sourceBrowser?: string;
+  chunkProgress?: number[];
+  savedPath?: string;
+  blobUrl?: string;
+  errorMessage?: string;
 }
 
 export interface TurboSpeedComparison {
@@ -225,7 +229,9 @@ export function validateDownloadUrl(rawUrl: string): {
   }
 
   try {
-    const parsed = new URL(trimmed);
+    const parsed = trimmed.startsWith('/')
+      ? new URL(trimmed, 'http://localhost:3000')
+      : new URL(trimmed);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
       return {
         valid: false,

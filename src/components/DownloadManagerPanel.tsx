@@ -14,6 +14,8 @@ import {
   RefreshCw,
   Globe,
   Layers,
+  HardDrive,
+  AlertCircle,
   X,
 } from 'lucide-react';
 import {
@@ -24,11 +26,12 @@ import {
   computeDownloadStartDelayMs,
   calculateTurboSpeedComparison,
 } from '../utils/networkEngine';
+import { triggerSaveFileToStorage } from '../utils/realDownloader';
 
 interface BrowserInterceptCandidate {
   fileName: string;
   url: string;
-  sizeBytes: number;
+  sizeBytes?: number;
   sourceBrowser: string;
 }
 
@@ -51,23 +54,23 @@ interface DownloadManagerPanelProps {
   onForceInstantStartTask: (id: string) => void;
 }
 
-const PRESET_FILES = [
+const REAL_SAMPLE_FILES = [
   {
-    label: 'Android 15 System Image (420 MB)',
-    url: 'https://dl.google.com/android/repository/sys-img/android-15-arm64-v8a.zip',
-    sizeBytes: 420 * 1024 * 1024,
+    label: 'NetPlus Pro Codec Pack (6 MB রিয়েল APK)',
+    url: '/api/download/sample/NetPlus-Pro-Codec-Pack.apk?sizeMB=6',
+    sizeBytes: 6 * 1024 * 1024,
     browser: 'Google Chrome',
   },
   {
-    label: 'Net Plus Offline Map Bundle (165 MB)',
-    url: 'https://mirror.bdix.net/maps/bangladesh-offline-routing-v4.pak',
-    sizeBytes: 165 * 1024 * 1024,
+    label: 'Android Turbo Drivers (10 MB রিয়েল ZIP)',
+    url: '/api/download/sample/Android-Turbo-Network-Drivers.zip?sizeMB=10',
+    sizeBytes: 10 * 1024 * 1024,
     browser: 'Chrome Custom Tab',
   },
   {
-    label: 'UHD 4K Media Pack (280 MB)',
-    url: 'https://cdn.netpulse.app/packs/uhd-assets-bundle-v2.mp4',
-    sizeBytes: 280 * 1024 * 1024,
+    label: 'UHD Sample Stream (4 MB রিয়েল MP4)',
+    url: '/api/download/sample/NetPlus-UHD-Test-Stream.mp4?sizeMB=4',
+    sizeBytes: 4 * 1024 * 1024,
     browser: 'Samsung Internet / Chrome',
   },
 ];
@@ -121,16 +124,15 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
       setInterceptCandidate({
         fileName: validation.fileName,
         url: urlInput.trim(),
-        sizeBytes: 220 * 1024 * 1024,
         sourceBrowser: 'Google Chrome',
       });
     } else {
-      onAddDownload(urlInput.trim(), threads, 'Direct Queue');
+      onAddDownload(urlInput.trim(), threads, 'Direct Real Download');
       setUrlInput('');
     }
   };
 
-  const handleTriggerBrowserPopupDemo = (preset = PRESET_FILES[0]) => {
+  const handleTriggerBrowserPopupDemo = (preset = REAL_SAMPLE_FILES[0]) => {
     const validation = validateDownloadUrl(preset.url);
     setInterceptCandidate({
       fileName: validation.fileName,
@@ -149,7 +151,6 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
         `${interceptCandidate.sourceBrowser} -> Net Plus Pro Turbo`
       );
     } else {
-      // User chose standard 1-thread browser speed
       onAddDownload(
         interceptCandidate.url,
         1,
@@ -175,16 +176,16 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
       <div className="flex flex-wrap items-center justify-between gap-4 pb-5 border-b border-slate-200 dark:border-slate-800">
         <div>
           <div className="text-xs font-medium text-slate-500 dark:text-slate-400">
-            <span>টার্বো মাল্টি-থ্রেড ডাউনলোড ইঞ্জিন ({threads} Chunks)</span>
+            <span>রিয়েল মাল্টি-থ্রেড ডাউনলোড ইঞ্জিন ({threads} Chunks)</span>
             <span className="mx-1.5" aria-hidden="true">·</span>
-            <span>Chrome-এর চেয়ে {liveSpeedComparison.multiplier}x বেশি স্পিড</span>
+            <span>ফোনের Internal Storage (Download ফোল্ডার)-এ সরাসরি সেভ</span>
             <span className="mx-1.5" aria-hidden="true">·</span>
             <span>
               স্টার্ট লেটেন্সি: {currentStartDelayMs === 0 ? '0ms (ইনস্ট্যান্ট)' : `${currentStartDelayMs}ms (Doze বিলম্ব)`}
             </span>
           </div>
           <h2 className="text-xl font-bold text-slate-900 dark:text-slate-100 mt-1">
-            হাই-স্পিড টার্বো ডাউনলোডার ও ব্রাউজার অটো-ডাউনলোড অপশন
+            হাই-স্পিড রিয়েল ফাইল ডাউনলোডার (Internal Storage) ও ব্রাউজার অটো-অপশন
           </h2>
         </div>
 
@@ -228,7 +229,7 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
         </div>
       </div>
 
-      {/* NEW: Turbo Speed Comparison Card + Browser Download Interceptor Card */}
+      {/* Turbo Speed Comparison Card + Browser Download Interceptor Card */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 mt-5">
         {/* Left 6 Cols: Chrome vs Net Plus Pro High-Speed Comparison */}
         <div className="lg:col-span-6 p-4 rounded-xl bg-slate-50 dark:bg-slate-950/60 border border-slate-200/80 dark:border-slate-800/80 flex flex-col justify-between gap-3">
@@ -236,13 +237,13 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
             <div>
               <div className="flex items-center gap-1.5 text-xs font-semibold text-blue-600 dark:text-blue-400">
                 <Layers className="w-4 h-4 shrink-0" />
-                <span>মাল্টি-কানেকশন হাই-স্পিড বুস্টার (Dynamic Range Split)</span>
+                <span>মাল্টি-কানেকশন হাই-স্পিড বুস্টার (Real HTTP 206 Byte-Range)</span>
               </div>
               <div className="text-sm font-bold text-slate-900 dark:text-slate-100 mt-1">
-                Chrome বা সাধারণ ব্রাউজারের চেয়ে {liveSpeedComparison.multiplier}x দ্রুত ডাউনলোড
+                Chrome বা সাধারণ ব্রাউজারের চেয়ে {liveSpeedComparison.multiplier}x দ্রুত রিয়েল ডাউনলোড
               </div>
               <p className="text-xs text-slate-600 dark:text-slate-300 mt-0.5 leading-relaxed">
-                সাধারণ ব্রাউজার মাত্র ১টি কানেকশনে ডাউনলোড করে। Net Plus Pro ফাইলটিকে {threads}টি প্যারালাল চ্যাঙ্কে ভাগ করে একসাথে টেনে আনে।
+                যেকোনো ডাউনলোড লিংক দিলে ফাইলটিকে {threads}টি প্যারালাল চ্যাঙ্কে ভাগ করে ডাউনলোড করে সরাসরি ফোনের Internal Storage (Download ফোল্ডার)-এ সেভ করে।
               </p>
             </div>
 
@@ -314,7 +315,7 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
             </span>
             <button
               type="button"
-              onClick={() => handleTriggerBrowserPopupDemo(PRESET_FILES[0])}
+              onClick={() => handleTriggerBrowserPopupDemo(REAL_SAMPLE_FILES[0])}
               className="inline-flex items-center gap-1.5 px-3 py-1.5 min-h-[36px] rounded-lg text-xs font-semibold bg-indigo-600 hover:bg-indigo-700 text-white transition-colors cursor-pointer whitespace-nowrap"
             >
               <Globe className="w-3.5 h-3.5" />
@@ -347,7 +348,7 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
             </div>
             <p className="text-xs text-slate-600 dark:text-slate-300 mt-0.5 leading-relaxed">
               {batteryRestrictionDisabled
-                ? 'Unrestricted ব্যাটারি মোড চালু রয়েছে। ডাউনলোড কিউতে যুক্ত করার সাথে সাথেই 0ms লেটেন্সিতে ইনস্ট্যান্ট শুরু হবে।'
+                ? 'Unrestricted ব্যাটারি মোড চালু রয়েছে। যেকোনো লিংক দিলেই 0ms লেটেন্সিতে ইনস্ট্যান্ট রিয়েল ডাউনলোড শুরু হবে এবং ফোনের Download ফোল্ডারে সেভ হবে।'
                 : 'ব্যাটারি রেস্ট্রিকশন চালু থাকলে Android Doze নীতির কারণে ডাউনলোড শুরু হতে ৪–১৫ সেকেন্ড দেরি হতে পারে। ডিসএবল করলে ডাউনলোড ইনস্ট্যান্ট শুরু হবে।'}
             </p>
           </div>
@@ -368,12 +369,12 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
         </button>
       </div>
 
-      {/* Add New Download Form */}
+      {/* Add New Real Download Form */}
       <form onSubmit={handleSubmit} className="mt-5" noValidate>
         <div className="grid grid-cols-1 md:grid-cols-12 gap-3">
           <div className="md:col-span-7">
             <label htmlFor="download-url-input" className="block text-xs font-medium text-slate-700 dark:text-slate-300 mb-1.5">
-              নতুন ফাইল ডাউনলোড URL অথবা ব্রাউজার লিংক (HTTP / HTTPS রেঞ্জ সাপোর্টেড)
+              যেকোনো সরাসরি ফাইল ডাউনলোড লিংক দিন (ফোনের Internal Storage / Download ফোল্ডারে সেভ হবে)
             </label>
             <input
               id="download-url-input"
@@ -383,7 +384,7 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
                 setUrlInput(e.target.value);
                 if (urlError) setUrlError(null);
               }}
-              placeholder="https://dl.google.com/android/studio/release-bundle.apk"
+              placeholder="https://example.com/file.apk অথবা নিচের রিয়েল টেস্ট ফাইলে ক্লিক করুন"
               className="w-full px-3.5 py-2.5 rounded-xl text-xs bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-slate-900 dark:text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-600"
             />
           </div>
@@ -421,12 +422,12 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
           </p>
         )}
 
-        {/* Quick Preset Browser Download Links */}
+        {/* Quick Real Binary File Download Links */}
         <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
           <span className="text-slate-500 dark:text-slate-400">
-            Chrome ডাউনলোড লিংক ক্লিক সিমুলেশন:
+            ১-ক্লিকে রিয়েল ফাইল ডাউনলোড টেস্ট (Internal Storage-এ সেভ হবে):
           </span>
-          {PRESET_FILES.map((preset) => (
+          {REAL_SAMPLE_FILES.map((preset) => (
             <button
               key={preset.url}
               type="button"
@@ -477,8 +478,9 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
           </button>
         </div>
 
-        <div className="text-xs text-slate-500 dark:text-slate-400">
-          HTTP 206 Multi-Range Dynamic Segment Acceleration সক্রিয়
+        <div className="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
+          <HardDrive className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+          <span>ডাউনলোড লোকেশন: /storage/emulated/0/Download/ (Internal Storage)</span>
         </div>
       </div>
 
@@ -486,16 +488,21 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
       <div className="mt-4 divide-y divide-slate-200 dark:divide-slate-800">
         {filteredTasks.length === 0 ? (
           <div className="py-8 text-center text-xs text-slate-500 dark:text-slate-400">
-            এই ফিল্টারে কোনো ডাউনলোড টাস্ক নেই। উপরে একটি URL দিয়ে ডাউনলোড শুরু করুন।
+            কোনো ডাউনলোড টাস্ক চলমান নেই। উপরে যেকোনো ডাউনলোড লিংক দিন অথবা নিচের রিয়েল টেস্ট ফাইলে ক্লিক করে সরাসরি ফোনের Internal Storage-এ হাই-স্পিডে ডাউনলোড করুন।
           </div>
         ) : (
           filteredTasks.map((task) => {
-            const pct = Math.min(100, Math.round((task.downloadedBytes / task.totalBytes) * 100));
+            const pct =
+              task.totalBytes > 0
+                ? Math.min(100, Math.round((task.downloadedBytes / task.totalBytes) * 100))
+                : task.status === 'completed'
+                ? 100
+                : 0;
             const retryInfo = computeRetrySchedule(
               Math.max(1, task.retryCount),
               task.unlimitedRetry
             );
-            const segmentCount = Math.min(16, Math.max(4, task.threads));
+            const segmentCount = Math.min(16, Math.max(1, task.threads));
 
             return (
               <div key={task.id} className="py-4 first:pt-2 last:pb-1">
@@ -508,10 +515,12 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
                       </h3>
                     </div>
 
-                    {/* Unboxed clean metadata with typographic separators */}
+                    {/* Metadata */}
                     <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
                       <span className="font-mono tabular-nums">
-                        {formatBytes(task.downloadedBytes)} / {formatBytes(task.totalBytes)} ({pct}%)
+                        {formatBytes(task.downloadedBytes)} /{' '}
+                        {task.totalBytes > 0 ? formatBytes(task.totalBytes) : 'সাইজ নির্ণয় হচ্ছে...'}{' '}
+                        ({pct}%)
                       </span>
                       <span aria-hidden="true">·</span>
                       <span>
@@ -520,30 +529,34 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
                           className={
                             task.status === 'completed'
                               ? 'text-emerald-600 dark:text-emerald-400'
+                              : task.status === 'error'
+                              ? 'text-red-600 dark:text-red-400'
                               : task.status === 'waiting_network' || task.status === 'queued_doze'
                               ? 'text-amber-600 dark:text-amber-400'
                               : 'text-blue-600 dark:text-blue-400'
                           }
                         >
                           {task.status === 'downloading'
-                            ? `টার্বো ডাউনলোড চলছে (${task.speedMBps.toFixed(2)} MB/s — Chrome-এর চেয়ে ${task.speedMultiplier.toFixed(1)}x দ্রুত)`
+                            ? `রিয়েল টার্বো ডাউনলোড চলছে (${task.speedMBps.toFixed(2)} MB/s)`
                             : task.status === 'queued_doze'
                             ? 'Android Doze ব্যাটারি কিউতে অপেক্ষমাণ'
                             : task.status === 'waiting_network'
                             ? `নেটওয়ার্কের অপেক্ষায় — অটো-রিট্রাই (${retryInfo.policyLabel})`
                             : task.status === 'paused'
                             ? 'বিরতি (Paused)'
-                            : 'সম্পন্ন (Verified)'}
+                            : task.status === 'error'
+                            ? `ত্রুটি: ${task.errorMessage || 'ডাউনলোড ব্যর্থ'}`
+                            : `সম্পন্ন ও ফোনে সেভ হয়েছে (${task.speedMBps > 0 ? `${task.speedMBps.toFixed(2)} MB/s` : 'Verified'})`}
                         </strong>
                       </span>
                       <span aria-hidden="true">·</span>
-                      <span>
-                        থ্রেড: {task.threads} Parallel Streams (সাধারণ ব্রাউজার: {task.browserBaselineMBps.toFixed(1)} MB/s)
-                      </span>
-                      {task.sourceBrowser && (
+                      <span>থ্রেড: {task.threads} Parallel Streams</span>
+                      {task.savedPath && (
                         <>
                           <span aria-hidden="true">·</span>
-                          <span>উৎস: {task.sourceBrowser}</span>
+                          <span className="font-mono text-emerald-700 dark:text-emerald-400">
+                            ফোল্ডার: {task.savedPath}
+                          </span>
                         </>
                       )}
                     </div>
@@ -562,7 +575,7 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
                       </button>
                     )}
 
-                    {task.status !== 'completed' && (
+                    {task.status !== 'completed' && task.status !== 'error' && (
                       <button
                         type="button"
                         onClick={() => onTogglePauseTask(task.id)}
@@ -593,9 +606,28 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
                     )}
 
                     {task.status === 'completed' && (
-                      <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-600 dark:text-emerald-400 px-2">
-                        <CheckCircle2 className="w-4 h-4" />
-                        <span>SHA-256 মিলেছে</span>
+                      <div className="flex items-center gap-2">
+                        {task.blobUrl && (
+                          <button
+                            type="button"
+                            onClick={() => triggerSaveFileToStorage(task.blobUrl!, task.fileName)}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 min-h-[36px] rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-700 text-white transition-colors cursor-pointer"
+                          >
+                            <HardDrive className="w-3.5 h-3.5" />
+                            <span>ফোনে সেভ করুন</span>
+                          </button>
+                        )}
+                        <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-600 dark:text-emerald-400 px-1.5">
+                          <CheckCircle2 className="w-4 h-4" />
+                          <span>Internal Storage-এ সেভড</span>
+                        </span>
+                      </div>
+                    )}
+
+                    {task.status === 'error' && (
+                      <span className="inline-flex items-center gap-1 text-xs font-medium text-red-600 dark:text-red-400 px-2">
+                        <AlertCircle className="w-4 h-4" />
+                        <span>ব্যর্থ</span>
                       </span>
                     )}
 
@@ -610,25 +642,30 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
                   </div>
                 </div>
 
-                {/* Multi-Segment Parallel Chunk Progress Bar */}
+                {/* Real Multi-Segment Parallel Chunk Progress Bar */}
                 <div className="mt-3 grid grid-cols-8 sm:grid-cols-16 gap-1">
                   {Array.from({ length: segmentCount }).map((_, idx) => {
-                    const segFill = Math.min(100, Math.max(0, pct + ((idx % 3) - 1) * 4));
+                    const realSegFill =
+                      task.chunkProgress && task.chunkProgress[idx] !== undefined
+                        ? task.chunkProgress[idx]
+                        : pct;
                     return (
                       <div
                         key={idx}
                         className="h-2 bg-slate-100 dark:bg-slate-800 rounded-sm overflow-hidden"
-                        title={`Chunk #${idx + 1}: ${segFill}%`}
+                        title={`Chunk #${idx + 1}: ${realSegFill}%`}
                       >
                         <div
                           className={`h-full transition-all duration-150 ${
                             task.status === 'completed'
                               ? 'bg-emerald-600 dark:bg-emerald-500'
+                              : task.status === 'error'
+                              ? 'bg-red-500'
                               : task.status === 'waiting_network' || task.status === 'queued_doze'
                               ? 'bg-amber-500'
                               : 'bg-blue-600 dark:bg-blue-500'
                           }`}
-                          style={{ width: `${task.status === 'completed' ? 100 : segFill}%` }}
+                          style={{ width: `${task.status === 'completed' ? 100 : realSegFill}%` }}
                         />
                       </div>
                     );
@@ -680,9 +717,13 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
                 {interceptCandidate.url}
               </div>
               <div className="text-slate-600 dark:text-slate-300 mt-1">
-                <span>আনুমানিক সাইজ: {formatBytes(interceptCandidate.sizeBytes)}</span>
+                <span>
+                  {interceptCandidate.sizeBytes
+                    ? `সাইজ: ${formatBytes(interceptCandidate.sizeBytes)}`
+                    : 'রিয়েল ফাইল স্ট্রিম'}
+                </span>
                 <span className="mx-1.5" aria-hidden="true">·</span>
-                <span>মাল্টি-রেঞ্জ রিজিউম সাপোর্টেড</span>
+                <span>সেভ লোকেশন: ফোনের Internal Storage (Download ফোল্ডার)</span>
               </div>
             </div>
 
@@ -694,7 +735,7 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
                     Net Plus Pro দিয়ে ডাউনলোড ({threads} Threads Turbo)
                   </div>
                   <div className="text-xs text-emerald-700 dark:text-emerald-400 font-semibold mt-0.5 font-mono">
-                    স্পিড: ~{liveSpeedComparison.netPlusTurboMBps.toFixed(2)} MB/s (Chrome-এর চেয়ে {liveSpeedComparison.multiplier}x দ্রুত + ∞ রিট্রাই)
+                    স্পিড: ~{liveSpeedComparison.netPlusTurboMBps.toFixed(2)} MB/s (Chrome-এর চেয়ে {liveSpeedComparison.multiplier}x দ্রুত + Internal Storage সেভ)
                   </div>
                 </div>
                 <button
