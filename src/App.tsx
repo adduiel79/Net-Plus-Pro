@@ -11,6 +11,7 @@ import {
   NetworkServiceConfig,
   AppUpdateInfo,
   validateDownloadUrl,
+  classifyFileCategory,
   computeDownloadStartDelayMs,
   calculateTurboSpeedComparison,
   computeResumedProgressState,
@@ -113,8 +114,8 @@ export default function App() {
     {
       id: 'log-1',
       time: '১০:৪৪:০১',
-      event: 'BACKGROUND_KEEPALIVE_LOCK',
-      detail: 'অ্যাপ থেকে বের হলেও ব্যাকগ্রাউন্ড নেট সংযোগ ও ডাউনলোড সচল রাখার WakeLock/WifiLock সক্রিয়',
+      event: 'AUTO_CATEGORY_TAGGER',
+      detail: 'ফাইল অটো-ট্যাগিং সক্রিয়: Images, Videos, Documents, Archives ও Apps সাবফোল্ডারে অটো-অর্গানাইজেশন',
     },
     {
       id: 'log-2',
@@ -139,10 +140,10 @@ export default function App() {
     downloadUrl: '/api/download/sample/NetPlus-Pro-v2.5.0-stable.apk?sizeMB=6',
     mandatory: false,
     changelog: [
+      'ডাউনলোড সম্পন্ন হলে ফাইল অটো-ট্যাগিংয়ের মাধ্যমে স্বয়ংক্রিয়ভাবে Images, Videos, Documents, Archives ও Apps সাবফোল্ডারে সেভ',
       'অ্যাপ মিনিমাইজ বা অ্যাপ থেকে বের হয়ে গেলেও ব্যাকগ্রাউন্ডে নেট সংযোগ বিচ্ছিন্ন হবে না এবং ডাউনলোড পূর্ণ গতিতে চলবে',
       'YouTube, Facebook, TikTok ও Instagram ভিডিও লিংক দিলে সরাসরি HD .mp4 ভিডিও হিসেবে Internal Storage-এ ডাউনলোড',
       'ডাউনলোড সম্পন্ন বা কোনো ত্রুটি হলে ফ্লোটিং টোস্ট নোটিফিকেশন (Toast Notification) এর মাধ্যমে তাৎক্ষণিক অ্যালার্ট',
-      'নেট অফ হয়ে পুনরায় চালু হলে ০% থেকে না শুরু হয়ে ঠিক যে পর্যন্ত ডাউনলোড হয়েছিল সেখান থেকেই পুনরায় শুরু',
     ],
   });
 
@@ -180,22 +181,27 @@ export default function App() {
         threads,
         unlimitedRetry,
         callbacks: {
-          onMetadata: ({ fileName, totalBytes }) => {
+          onMetadata: ({ fileName, totalBytes, category, categoryLabelBn, savedPath }) => {
             setDownloads((prev) =>
-              prev.map((t) =>
-                t.id === taskId
-                  ? {
-                      ...t,
-                      fileName: fileName || t.fileName,
-                      totalBytes: totalBytes > 0 ? totalBytes : t.totalBytes,
-                      savedPath: `/storage/emulated/0/Download/${fileName || t.fileName}`,
-                    }
-                  : t
-              )
+              prev.map((t) => {
+                if (t.id !== taskId) return t;
+                const resolvedName = fileName || t.fileName;
+                const catMeta = classifyFileCategory(resolvedName);
+                return {
+                  ...t,
+                  fileName: resolvedName,
+                  category: category || catMeta.category,
+                  categoryLabelBn: categoryLabelBn || catMeta.labelBn,
+                  totalBytes: totalBytes > 0 ? totalBytes : t.totalBytes,
+                  savedPath: savedPath || catMeta.fullSavedPath,
+                };
+              })
             );
           },
           onProgress: ({
             fileName,
+            category,
+            categoryLabelBn,
             downloadedBytes,
             totalBytes,
             speedMBps,
@@ -218,16 +224,20 @@ export default function App() {
                   t.chunkProgress,
                   chunkProgress
                 );
+                const resolvedName = fileName || t.fileName;
+                const catMeta = classifyFileCategory(resolvedName);
                 return {
                   ...t,
-                  fileName: fileName || t.fileName,
+                  fileName: resolvedName,
+                  category: category || t.category || catMeta.category,
+                  categoryLabelBn: categoryLabelBn || t.categoryLabelBn || catMeta.labelBn,
                   downloadedBytes: resumed.downloadedBytes,
                   totalBytes: totalBytes > 0 ? totalBytes : t.totalBytes,
                   speedMBps: nextStatus === 'paused' || nextStatus === 'waiting_network' ? 0 : speedMBps,
                   etaSeconds,
                   chunkProgress: resumed.chunkProgress,
                   retryCount,
-                  savedPath: savedPath || t.savedPath,
+                  savedPath: savedPath || t.savedPath || catMeta.fullSavedPath,
                   status: nextStatus,
                 };
               })
@@ -235,18 +245,25 @@ export default function App() {
           },
           onCompleted: ({
             fileName,
+            category,
+            categoryLabelBn,
             totalBytes,
             checksumSha256,
             blobUrl,
             savedPath,
             averageSpeedMBps,
           }) => {
+            const catMeta = classifyFileCategory(fileName);
+            const finalCategory = category || catMeta.category;
+            const finalSavedPath = savedPath || catMeta.fullSavedPath;
             setDownloads((prev) =>
               prev.map((t) =>
                 t.id === taskId
                   ? {
                       ...t,
                       fileName: fileName || t.fileName,
+                      category: finalCategory,
+                      categoryLabelBn: categoryLabelBn || catMeta.labelBn,
                       downloadedBytes: totalBytes,
                       totalBytes,
                       speedMBps: averageSpeedMBps,
@@ -254,7 +271,7 @@ export default function App() {
                       status: 'completed',
                       checksumSha256,
                       blobUrl,
-                      savedPath,
+                      savedPath: finalSavedPath,
                       chunkProgress: Array.from({ length: Math.min(16, t.threads) }, () => 100),
                     }
                   : t
@@ -262,13 +279,13 @@ export default function App() {
             );
             appendNetworkLog(
               'SAVED_INTERNAL_STORAGE',
-              `${fileName} ডাউনলোড সম্পন্ন এবং ফোনের ${savedPath}-এ সেভ হয়েছে (${averageSpeedMBps} MB/s)`
+              `[Auto-Tag: ${finalCategory}] ${fileName} ডাউনলোড সম্পন্ন এবং ফোনের ${finalSavedPath}-এ সেভ হয়েছে (${averageSpeedMBps} MB/s)`
             );
             triggerToast(
               'success',
-              'ডাউনলোড সম্পন্ন হয়েছে!',
-              `${fileName} সফলভাবে ফোনের Internal Storage-এ সেভ হয়েছে।`,
-              `${savedPath} · স্পিড: ${averageSpeedMBps.toFixed(2)} MB/s`
+              `ডাউনলোড সম্পন্ন! [Auto-Tag: ${finalCategory}]`,
+              `${fileName} স্বয়ংক্রিয়ভাবে ${finalCategory} সাবফোল্ডারে অর্গানাইজ ও সেভ হয়েছে।`,
+              `${finalSavedPath} · স্পিড: ${averageSpeedMBps.toFixed(2)} MB/s`
             );
           },
           onError: (errorMsg) => {
@@ -301,6 +318,7 @@ export default function App() {
     (url: string, threads: number, sourceBrowser = 'Google Chrome') => {
       const { fileName, normalizedUrl } = validateDownloadUrl(url);
       const cleanUrl = normalizedUrl || url.trim();
+      const catMeta = classifyFileCategory(fileName);
       const delayMs = computeDownloadStartDelayMs(
         batteryRestrictionDisabled,
         serviceConfig.foregroundServiceEnabled
@@ -312,6 +330,8 @@ export default function App() {
         id: taskId,
         fileName,
         url: cleanUrl,
+        category: catMeta.category,
+        categoryLabelBn: catMeta.labelBn,
         totalBytes: 0,
         downloadedBytes: 0,
         speedMBps: 0,
@@ -332,13 +352,13 @@ export default function App() {
         checksumSha256: 'Computing...',
         sourceBrowser,
         chunkProgress: Array.from({ length: Math.min(16, threads) }, () => 0),
-        savedPath: `/storage/emulated/0/Download/${fileName}`,
+        savedPath: catMeta.fullSavedPath,
       };
 
       setDownloads((prev) => [newTask, ...prev]);
       appendNetworkLog(
         'REAL_TURBO_START',
-        `${fileName} রিয়েল মাল্টি-থ্রেড ডাউনলোড শুরু (${threads} Threads -> /storage/emulated/0/Download/)`
+        `[Auto-Tag: ${catMeta.category}] ${fileName} ডাউনলোড শুরু (${threads} Threads -> ${catMeta.targetDir})`
       );
 
       if (batteryRestrictionDisabled) {

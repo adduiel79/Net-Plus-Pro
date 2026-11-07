@@ -23,6 +23,24 @@ export interface SpeedTestRecord {
   grade: 'Optimal' | 'Good' | 'Fair';
 }
 
+export type FileCategoryType =
+  | 'Images'
+  | 'Videos'
+  | 'Documents'
+  | 'Archives'
+  | 'Apps'
+  | 'Audio'
+  | 'Others';
+
+export interface FileCategoryMeta {
+  category: FileCategoryType;
+  subfolder: FileCategoryType;
+  labelBn: string;
+  badgeText: string;
+  targetDir: string;
+  fullSavedPath: string;
+}
+
 export interface DownloadTask {
   id: string;
   fileName: string;
@@ -44,6 +62,8 @@ export interface DownloadTask {
   sourceBrowser?: string;
   chunkProgress?: number[];
   savedPath?: string;
+  category?: FileCategoryType;
+  categoryLabelBn?: string;
   blobUrl?: string;
   errorMessage?: string;
 }
@@ -232,6 +252,80 @@ export function extensionFromMimeType(mimeType?: string): string {
   if (mime.includes('webp')) return '.webp';
   if (mime.includes('iso')) return '.iso';
   return '.bin';
+}
+
+/**
+ * Automatically classifies a downloaded file into an organized category subfolder
+ * ('Images', 'Videos', 'Documents', 'Archives', 'Apps', 'Audio', 'Others') inside
+ * the phone's Internal Storage Download directory (/storage/emulated/0/Download/<Category>/).
+ */
+export function classifyFileCategory(fileName: string, mimeType?: string): FileCategoryMeta {
+  const cleanName = (fileName || 'NetPlus_Download.bin').trim();
+  const lowerName = cleanName.toLowerCase();
+  const lowerMime = (mimeType || '').toLowerCase();
+  const dotIdx = lowerName.lastIndexOf('.');
+  const ext = dotIdx >= 0 ? lowerName.slice(dotIdx) : '';
+
+  let category: FileCategoryType = 'Others';
+  let labelBn = 'অন্যান্য (Others)';
+
+  if (
+    ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.bmp', '.svg', '.heic', '.ico', '.avif'].includes(ext) ||
+    lowerMime.startsWith('image/')
+  ) {
+    category = 'Images';
+    labelBn = 'ছবি (Images)';
+  } else if (
+    ['.mp4', '.mkv', '.webm', '.avi', '.mov', '.flv', '.3gp', '.m4v', '.ts'].includes(ext) ||
+    lowerMime.startsWith('video/')
+  ) {
+    category = 'Videos';
+    labelBn = 'ভিডিও (Videos)';
+  } else if (
+    ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.txt', '.csv', '.epub', '.rtf', '.odt'].includes(ext) ||
+    lowerMime.includes('pdf') ||
+    lowerMime.includes('msword') ||
+    lowerMime.includes('officedocument') ||
+    lowerMime.startsWith('text/plain') ||
+    lowerMime.startsWith('text/csv')
+  ) {
+    category = 'Documents';
+    labelBn = 'ডকুমেন্ট (Documents)';
+  } else if (
+    ['.zip', '.rar', '.7z', '.tar', '.gz', '.bz2', '.xz', '.iso', '.tgz'].includes(ext) ||
+    lowerMime.includes('zip') ||
+    lowerMime.includes('rar') ||
+    lowerMime.includes('7z') ||
+    lowerMime.includes('compressed') ||
+    lowerMime.includes('tar')
+  ) {
+    category = 'Archives';
+    labelBn = 'আর্কাইভ (Archives)';
+  } else if (
+    ['.apk', '.xapk', '.apkm', '.aab', '.obb', '.exe', '.msi', '.dmg', '.deb'].includes(ext) ||
+    lowerMime.includes('android.package-archive')
+  ) {
+    category = 'Apps';
+    labelBn = 'অ্যাপস (Apps)';
+  } else if (
+    ['.mp3', '.wav', '.flac', '.aac', '.ogg', '.m4a', '.opus', '.wma'].includes(ext) ||
+    lowerMime.startsWith('audio/')
+  ) {
+    category = 'Audio';
+    labelBn = 'অডিও (Audio)';
+  }
+
+  const targetDir = `/storage/emulated/0/Download/${category}`;
+  const fullSavedPath = `${targetDir}/${cleanName}`;
+
+  return {
+    category,
+    subfolder: category,
+    labelBn,
+    badgeText: `Auto-Tag: ${category}`,
+    targetDir,
+    fullSavedPath,
+  };
 }
 
 /**

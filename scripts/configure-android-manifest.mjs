@@ -170,8 +170,6 @@ import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 public class MainActivity extends BridgeActivity {
     private static final String BG_CHANNEL_ID = "netplus_turbo_bg_channel";
@@ -553,6 +551,45 @@ public class MainActivity extends BridgeActivity {
         String fileName = "";
     }
 
+    private static String extractFacebookMp4FromHtml(String html) {
+        if (html == null || html.isEmpty()) return "";
+        String q = String.valueOf((char) 34);
+        String bs = String.valueOf((char) 92);
+        String[] keys = new String[]{
+            q + "browser_native_hd_url" + q,
+            q + "browser_native_sd_url" + q,
+            q + "playable_url_quality_hd" + q,
+            q + "playable_url" + q,
+            q + "hd_src_no_ratelimit" + q,
+            q + "hd_src" + q,
+            q + "sd_src_no_ratelimit" + q,
+            q + "sd_src" + q,
+            "og:video:secure_url" + q + " content=" + q,
+            "og:video" + q + " content=" + q
+        };
+        for (String key : keys) {
+            int idx = html.indexOf(key);
+            if (idx >= 0) {
+                int httpStart = html.indexOf("http", idx + key.length());
+                if (httpStart >= 0 && httpStart - (idx + key.length()) < 32) {
+                    int endQuote = html.indexOf(q, httpStart);
+                    if (endQuote > httpStart) {
+                        String raw = html.substring(httpStart, endQuote);
+                        String cleaned = raw
+                            .replace(bs + "/", "/")
+                            .replace(bs + "u0025", "%")
+                            .replace(bs + "u0026", "&")
+                            .replace("&amp;", "&");
+                        if (cleaned.startsWith("http")) {
+                            return cleaned;
+                        }
+                    }
+                }
+            }
+        }
+        return "";
+    }
+
     private SocialResolveResult resolveSocialVideoInNative(String rawUrl, String requestedName) {
         SocialResolveResult res = new SocialResolveResult();
         try {
@@ -723,34 +760,10 @@ public class MainActivity extends BridgeActivity {
                     fbConn.setRequestProperty("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
                     if (fbConn.getResponseCode() == 200) {
                         String html = readStreamToString(fbConn.getInputStream());
-                        String[] regexes = new String[]{
-                            "\"browser_native_hd_url\"\\s*:\\s*\"([^\"]+)\"",
-                            "\"browser_native_sd_url\"\\s*:\\s*\"([^\"]+)\"",
-                            "\"playable_url_quality_hd\"\\s*:\\s*\"([^\"]+)\"",
-                            "\"playable_url\"\\s*:\\s*\"([^\"]+)\"",
-                            "\"hd_src_no_ratelimit\"\\s*:\\s*\"([^\"]+)\"",
-                            "\"hd_src\"\\s*:\\s*\"([^\"]+)\"",
-                            "\"sd_src_no_ratelimit\"\\s*:\\s*\"([^\"]+)\"",
-                            "\"sd_src\"\\s*:\\s*\"([^\"]+)\"",
-                            "property=\"og:video:secure_url\"\\s+content=\"([^\"]+)\"",
-                            "property=\"og:video\"\\s+content=\"([^\"]+)\""
-                        };
-                        for (String rgx : regexes) {
-                            Matcher m = Pattern.compile(rgx, Pattern.CASE_INSENSITIVE).matcher(html);
-                            if (m.find()) {
-                                String extracted = m.group(1);
-                                if (extracted != null) {
-                                    extracted = extracted
-                                        .replace("\\/", "/")
-                                        .replace("\\u0025", "%")
-                                        .replace("\\u0026", "&")
-                                        .replace("&amp;", "&");
-                                    if (extracted.startsWith("http")) {
-                                        res.resolvedUrl = extracted;
-                                        return res;
-                                    }
-                                }
-                            }
+                        String extracted = extractFacebookMp4FromHtml(html);
+                        if (!extracted.isEmpty()) {
+                            res.resolvedUrl = extracted;
+                            return res;
                         }
                     }
                 } catch (Exception ignored) {
@@ -951,6 +964,46 @@ public class MainActivity extends BridgeActivity {
         return base + ext;
     }
 
+    private static String resolveCategorySubfolder(String fileName, String contentType) {
+        String lowerName = fileName != null ? fileName.toLowerCase() : "";
+        String lowerMime = contentType != null ? contentType.toLowerCase() : "";
+        int dot = lowerName.lastIndexOf('.');
+        String ext = dot >= 0 ? lowerName.substring(dot) : "";
+
+        if (ext.equals(".jpg") || ext.equals(".jpeg") || ext.equals(".png") || ext.equals(".webp")
+                || ext.equals(".gif") || ext.equals(".bmp") || ext.equals(".svg") || ext.equals(".heic")
+                || lowerMime.startsWith("image/")) {
+            return "Images";
+        }
+        if (ext.equals(".mp4") || ext.equals(".mkv") || ext.equals(".webm") || ext.equals(".avi")
+                || ext.equals(".mov") || ext.equals(".flv") || ext.equals(".3gp") || ext.equals(".m4v")
+                || lowerMime.startsWith("video/")) {
+            return "Videos";
+        }
+        if (ext.equals(".pdf") || ext.equals(".doc") || ext.equals(".docx") || ext.equals(".xls")
+                || ext.equals(".xlsx") || ext.equals(".ppt") || ext.equals(".pptx") || ext.equals(".txt")
+                || ext.equals(".csv") || ext.equals(".epub") || ext.equals(".rtf")
+                || lowerMime.contains("pdf") || lowerMime.contains("msword") || lowerMime.contains("officedocument")) {
+            return "Documents";
+        }
+        if (ext.equals(".zip") || ext.equals(".rar") || ext.equals(".7z") || ext.equals(".tar")
+                || ext.equals(".gz") || ext.equals(".bz2") || ext.equals(".xz") || ext.equals(".iso")
+                || lowerMime.contains("zip") || lowerMime.contains("rar") || lowerMime.contains("7z") || lowerMime.contains("compressed")) {
+            return "Archives";
+        }
+        if (ext.equals(".apk") || ext.equals(".xapk") || ext.equals(".apkm") || ext.equals(".aab")
+                || ext.equals(".obb") || ext.equals(".exe") || ext.equals(".dmg")
+                || lowerMime.contains("android.package-archive")) {
+            return "Apps";
+        }
+        if (ext.equals(".mp3") || ext.equals(".wav") || ext.equals(".flac") || ext.equals(".aac")
+                || ext.equals(".ogg") || ext.equals(".m4a") || ext.equals(".opus")
+                || lowerMime.startsWith("audio/")) {
+            return "Audio";
+        }
+        return "Others";
+    }
+
     private static File createUniqueOutputFile(File dir, String safeFileName) {
         File candidate = new File(dir, safeFileName);
         if (!candidate.exists()) return candidate;
@@ -1053,9 +1106,11 @@ public class MainActivity extends BridgeActivity {
         @JavascriptInterface
         public String saveBase64ToDownloads(String base64Data, String fileName) {
             try {
-                File dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
-                if (!dir.exists()) dir.mkdirs();
+                File baseDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
                 String safeName = buildShortSafeFileName(fileName, fileName, "application/octet-stream");
+                String categoryFolder = resolveCategorySubfolder(safeName, null);
+                File dir = new File(baseDir, categoryFolder);
+                if (!dir.exists()) dir.mkdirs();
                 File outFile = createUniqueOutputFile(dir, safeName);
                 byte[] bytes = Base64.decode(base64Data, Base64.DEFAULT);
                 try (FileOutputStream fos = new FileOutputStream(outFile)) {
@@ -1165,8 +1220,10 @@ public class MainActivity extends BridgeActivity {
                     int threads = Math.max(1, Math.min(32, threadCount));
                     String guessedName = social.isSocial ? effectiveRequestedName : URLUtil.guessFileName(finalUrl, contentDisposition, contentType);
                     String safeName = buildShortSafeFileName(effectiveRequestedName, guessedName, contentType);
+                    String categorySubfolder = resolveCategorySubfolder(safeName, contentType);
 
-                    File downloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+                    File baseDownloadDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+                    File downloadDir = new File(baseDownloadDir, categorySubfolder);
                     if (!downloadDir.exists()) {
                         downloadDir.mkdirs();
                     }
@@ -1177,8 +1234,9 @@ public class MainActivity extends BridgeActivity {
                             testRaf.seek(0);
                         }
                     } catch (Exception permEx) {
-                        File fallbackDir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
-                        if (fallbackDir != null) {
+                        File baseFallbackDir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+                        if (baseFallbackDir != null) {
+                            File fallbackDir = new File(baseFallbackDir, categorySubfolder);
                             if (!fallbackDir.exists()) fallbackDir.mkdirs();
                             outFile = createUniqueOutputFile(fallbackDir, safeName);
                         }

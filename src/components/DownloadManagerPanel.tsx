@@ -18,10 +18,14 @@ import {
   Clock,
   Sparkles,
   Gauge,
+  FolderOpen,
+  Tag,
 } from 'lucide-react';
 import {
   DownloadTask,
+  FileCategoryType,
   validateDownloadUrl,
+  classifyFileCategory,
   formatBytes,
   formatRemainingTimeBn,
   computeRetrySchedule,
@@ -66,17 +70,30 @@ const REAL_SAMPLE_FILES = [
     url: 'https://www.youtube.com/watch?v=jNQXAC9IVRw',
   },
   {
-    label: 'Facebook Reel Video (.mp4)',
-    url: 'https://www.facebook.com/watch/?v=10153231379946729',
+    label: '4K Wallpaper (.jpg)',
+    url: '/api/download/sample/NetPlus-4K-Wallpaper.jpg?sizeMB=2',
   },
   {
-    label: 'NetPlus Codec Pack (6 MB APK)',
-    url: '/api/download/sample/NetPlus-Pro-Codec-Pack.apk?sizeMB=6',
+    label: 'Network Guide (.pdf)',
+    url: '/api/download/sample/NetPlus-Network-Guide.pdf?sizeMB=2',
   },
   {
-    label: 'Android Turbo Drivers (10 MB ZIP)',
-    url: '/api/download/sample/Android-Turbo-Network-Drivers.zip?sizeMB=10',
+    label: 'Turbo Drivers (.zip)',
+    url: '/api/download/sample/Android-Turbo-Network-Drivers.zip?sizeMB=4',
   },
+  {
+    label: 'NetPlus Codec (.apk)',
+    url: '/api/download/sample/NetPlus-Pro-Codec-Pack.apk?sizeMB=4',
+  },
+];
+
+const CATEGORY_FILTER_OPTIONS: { id: 'All' | FileCategoryType; label: string; folder: string }[] = [
+  { id: 'All', label: 'সব ফোল্ডার', folder: '/Download/*' },
+  { id: 'Videos', label: 'Videos', folder: '/Download/Videos/' },
+  { id: 'Images', label: 'Images', folder: '/Download/Images/' },
+  { id: 'Documents', label: 'Documents', folder: '/Download/Documents/' },
+  { id: 'Archives', label: 'Archives', folder: '/Download/Archives/' },
+  { id: 'Apps', label: 'Apps', folder: '/Download/Apps/' },
 ];
 
 export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
@@ -103,6 +120,7 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
   const [urlError, setUrlError] = useState<string | null>(null);
   const [pasteNotice, setPasteNotice] = useState<string | null>(null);
   const [filterStatus, setFilterStatus] = useState<'all' | 'active' | 'completed'>('all');
+  const [selectedCategory, setSelectedCategory] = useState<'All' | FileCategoryType>('All');
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   const currentStartDelayMs = computeDownloadStartDelayMs(
@@ -162,8 +180,12 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
   };
 
   const filteredTasks = tasks.filter((t) => {
-    if (filterStatus === 'active') return t.status !== 'completed';
-    if (filterStatus === 'completed') return t.status === 'completed';
+    if (filterStatus === 'active' && t.status === 'completed') return false;
+    if (filterStatus === 'completed' && t.status !== 'completed') return false;
+    if (selectedCategory !== 'All') {
+      const taskCat = t.category || classifyFileCategory(t.fileName).category;
+      if (taskCat !== selectedCategory) return false;
+    }
     return true;
   });
 
@@ -425,46 +447,81 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
         </div>
       </div>
 
-      {/* Queue Filter Header */}
-      <div className="mt-6 pt-5 border-t border-slate-200/80 dark:border-slate-800/80 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-1 p-1 bg-slate-100 dark:bg-slate-800/90 rounded-xl">
-          <button
-            type="button"
-            onClick={() => setFilterStatus('all')}
-            className={`px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
-              filterStatus === 'all'
-                ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
-                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-            }`}
-          >
-            সব ডাউনলোড ({tasks.length})
-          </button>
-          <button
-            type="button"
-            onClick={() => setFilterStatus('active')}
-            className={`px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
-              filterStatus === 'active'
-                ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
-                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-            }`}
-          >
-            চলমান ({tasks.filter((t) => t.status !== 'completed').length})
-          </button>
-          <button
-            type="button"
-            onClick={() => setFilterStatus('completed')}
-            className={`px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
-              filterStatus === 'completed'
-                ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
-                : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
-            }`}
-          >
-            সম্পন্ন ({tasks.filter((t) => t.status === 'completed').length})
-          </button>
+      {/* Queue Filter Header + Category Subfolder Organizer Tabs */}
+      <div className="mt-6 pt-5 border-t border-slate-200/80 dark:border-slate-800/80 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-1 p-1 bg-slate-100 dark:bg-slate-800/90 rounded-xl">
+            <button
+              type="button"
+              onClick={() => setFilterStatus('all')}
+              className={`px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
+                filterStatus === 'all'
+                  ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+              }`}
+            >
+              সব ডাউনলোড ({tasks.length})
+            </button>
+            <button
+              type="button"
+              onClick={() => setFilterStatus('active')}
+              className={`px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
+                filterStatus === 'active'
+                  ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+              }`}
+            >
+              চলমান ({tasks.filter((t) => t.status !== 'completed').length})
+            </button>
+            <button
+              type="button"
+              onClick={() => setFilterStatus('completed')}
+              className={`px-3.5 py-1.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer whitespace-nowrap ${
+                filterStatus === 'completed'
+                  ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+              }`}
+            >
+              সম্পন্ন ({tasks.filter((t) => t.status === 'completed').length})
+            </button>
+          </div>
+
+          <div className="text-xs text-slate-500 dark:text-slate-400 font-medium flex items-center gap-1.5">
+            <FolderOpen className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
+            <span>Auto-Tag Subfolders: Images, Videos, Documents, Archives ও Apps</span>
+          </div>
         </div>
 
-        <div className="text-xs text-slate-500 dark:text-slate-400 font-medium">
-          পাশে রিয়েল-টাইমে কত মিনিট ও সেকেন্ডে ডাউনলোড হবে তা লাইভ দেখা যাবে
+        {/* Auto-Tagged Category Subfolder Filter Bar */}
+        <div
+          data-testid="category-filter-bar"
+          className="flex items-center gap-1.5 overflow-x-auto pb-1"
+        >
+          {CATEGORY_FILTER_OPTIONS.map((opt) => {
+            const count =
+              opt.id === 'All'
+                ? tasks.length
+                : tasks.filter(
+                    (t) => (t.category || classifyFileCategory(t.fileName).category) === opt.id
+                  ).length;
+            const isSelected = selectedCategory === opt.id;
+            return (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() => setSelectedCategory(opt.id)}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                  isSelected
+                    ? 'bg-blue-600 text-white border-blue-600'
+                    : 'bg-slate-50 dark:bg-slate-950 text-slate-700 dark:text-slate-300 border-slate-200 dark:border-slate-800 hover:border-blue-400'
+                }`}
+              >
+                <FolderOpen className="w-3.5 h-3.5" />
+                <span>{opt.label}</span>
+                <span className="opacity-80 font-mono">({count})</span>
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -495,22 +552,33 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
                 : task.status === 'waiting_network'
                 ? 'নেটওয়ার্ক এলেই অটো-রিজিউম হবে'
                 : formatRemainingTimeBn(task.etaSeconds);
+            const catMeta = classifyFileCategory(task.fileName);
+            const resolvedCategory = task.category || catMeta.category;
+            const resolvedSavedPath = task.savedPath || catMeta.fullSavedPath;
 
             return (
               <div
                 key={task.id}
+                data-testid="download-task-card"
                 className="p-4 sm:p-5 rounded-2xl bg-slate-50 dark:bg-slate-950/80 border border-slate-200/90 dark:border-slate-800 transition-all"
               >
                 <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
                   {/* Left Info Column */}
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-2.5">
+                    <div className="flex flex-wrap items-center gap-2">
                       <div className="w-8 h-8 rounded-xl bg-blue-600/10 dark:bg-blue-500/15 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
                         <Download className="w-4 h-4" />
                       </div>
                       <h3 className="text-sm sm:text-base font-bold text-slate-900 dark:text-white truncate">
                         {task.fileName}
                       </h3>
+                      <span
+                        data-testid={`category-badge-${resolvedCategory}`}
+                        className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg text-[11px] font-bold bg-indigo-50 dark:bg-indigo-950/80 text-indigo-700 dark:text-indigo-300 border border-indigo-200/80 dark:border-indigo-800/80"
+                      >
+                        <Tag className="w-3 h-3" />
+                        <span>Auto-Tag: {resolvedCategory}</span>
+                      </span>
                     </div>
 
                     <div className="mt-2 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs text-slate-600 dark:text-slate-400 break-words">
@@ -521,14 +589,11 @@ export const DownloadManagerPanel: React.FC<DownloadManagerPanelProps> = ({
                       </span>
                       <span aria-hidden="true">·</span>
                       <span>{task.threads} Parallel Streams</span>
-                      {task.savedPath && (
-                        <>
-                          <span aria-hidden="true">·</span>
-                          <span className="font-mono text-emerald-700 dark:text-emerald-400 break-all">
-                            {task.savedPath}
-                          </span>
-                        </>
-                      )}
+                      <span aria-hidden="true">·</span>
+                      <span className="inline-flex items-center gap-1 font-mono text-emerald-700 dark:text-emerald-400 break-all">
+                        <FolderOpen className="w-3.5 h-3.5 shrink-0" />
+                        <span>{resolvedSavedPath}</span>
+                      </span>
                     </div>
 
                     {task.status === 'waiting_network' && (

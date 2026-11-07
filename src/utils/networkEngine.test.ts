@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import {
   calculatePingAndJitter,
   calculateThroughputMBps,
@@ -9,6 +10,7 @@ import {
   isNewerVersion,
   validateDownloadUrl,
   detectSocialVideoUrl,
+  classifyFileCategory,
   formatRemainingTimeBn,
   computeResumedProgressState,
 } from './networkEngine';
@@ -89,6 +91,28 @@ test('detectSocialVideoUrl and validateDownloadUrl recognize YouTube and Faceboo
   assert.equal(fb.suggestedFileName, 'Facebook_Video_9876543210.mp4');
 });
 
+test('classifyFileCategory auto-tags files into Images, Videos, Documents, Archives, Apps, and Audio subfolders', () => {
+  const img = classifyFileCategory('Wallpaper_4K.jpg', 'image/jpeg');
+  assert.equal(img.category, 'Images');
+  assert.equal(img.fullSavedPath, '/storage/emulated/0/Download/Images/Wallpaper_4K.jpg');
+
+  const vid = classifyFileCategory('YouTube_Video_jNQXAC9IVRw.mp4', 'video/mp4');
+  assert.equal(vid.category, 'Videos');
+  assert.equal(vid.fullSavedPath, '/storage/emulated/0/Download/Videos/YouTube_Video_jNQXAC9IVRw.mp4');
+
+  const doc = classifyFileCategory('Network_Manual.pdf', 'application/pdf');
+  assert.equal(doc.category, 'Documents');
+  assert.equal(doc.fullSavedPath, '/storage/emulated/0/Download/Documents/Network_Manual.pdf');
+
+  const arc = classifyFileCategory('Drivers_Pack.zip', 'application/zip');
+  assert.equal(arc.category, 'Archives');
+  assert.equal(arc.fullSavedPath, '/storage/emulated/0/Download/Archives/Drivers_Pack.zip');
+
+  const appPkg = classifyFileCategory('NetPlus_Codec.apk');
+  assert.equal(appPkg.category, 'Apps');
+  assert.equal(appPkg.fullSavedPath, '/storage/emulated/0/Download/Apps/NetPlus_Codec.apk');
+});
+
 test('formatRemainingTimeBn formats seconds into minutes and seconds in Bengali', () => {
   assert.equal(formatRemainingTimeBn(45), '০ মিনিট 45 সেকেন্ড বাকি');
   assert.equal(formatRemainingTimeBn(135), '2 মিনিট 15 সেকেন্ড বাকি');
@@ -103,6 +127,59 @@ test('computeResumedProgressState preserves downloaded bytes and chunk progress 
   const afterResume = computeResumedProgressState(15728640, 20971520, [50, 60, 40, 55], [68, 75, 58, 70]);
   assert.equal(afterResume.downloadedBytes, 20971520);
   assert.deepEqual(afterResume.chunkProgress, [68, 75, 58, 70]);
+});
+
+test('configure-android-manifest.mjs generates valid MainActivity.java with balanced braces and valid escapes', () => {
+  const scriptSrc = fs.readFileSync('scripts/configure-android-manifest.mjs', 'utf8');
+  const startMarker = 'const javaCode = `';
+  const endMarker = '`;\n  fs.writeFileSync(mainActivityPath, javaCode';
+  const startIdx = scriptSrc.indexOf(startMarker);
+  const endIdx = scriptSrc.lastIndexOf(endMarker);
+  assert.ok(startIdx > 0 && endIdx > startIdx, 'Should locate javaCode template literal');
+
+  const templateBody = scriptSrc.slice(startIdx + startMarker.length, endIdx);
+  // Evaluate template literal string
+  const javaCode = new Function(`return \`${templateBody}\`;`)() as string;
+  const lines = javaCode.split('\n');
+
+  let braceDepth = 0;
+  let parenDepth = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (trimmed.startsWith('//') || trimmed.startsWith('/*') || trimmed.startsWith('*')) continue;
+    let inStr = false;
+    let inChar = false;
+    for (let j = 0; j < line.length; j++) {
+      const ch = line[j];
+      if (!inStr && !inChar && ch === '/' && line[j + 1] === '/') break;
+      if (inStr) {
+        if (ch === '\\') {
+          const next = line[j + 1] || '';
+          assert.ok(
+            'btnfr"\'\\'.includes(next),
+            `Invalid Java string escape \\${next} at MainActivity.java:${i + 1}`
+          );
+          j++;
+        } else if (ch === '"') {
+          inStr = false;
+        }
+      } else if (inChar) {
+        if (ch === '\\') j++;
+        else if (ch === "'") inChar = false;
+      } else {
+        if (ch === '"') inStr = true;
+        else if (ch === "'") inChar = true;
+        else if (ch === '{') braceDepth++;
+        else if (ch === '}') braceDepth--;
+        else if (ch === '(') parenDepth++;
+        else if (ch === ')') parenDepth--;
+      }
+    }
+    assert.equal(inStr, false, `Unclosed string literal at MainActivity.java:${i + 1}`);
+  }
+  assert.equal(braceDepth, 0, 'Braces {} in MainActivity.java must be balanced');
+  assert.equal(parenDepth, 0, 'Parentheses () in MainActivity.java must be balanced');
 });
 
 

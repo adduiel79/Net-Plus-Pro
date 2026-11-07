@@ -1,8 +1,14 @@
-import { validateDownloadUrl, sanitizeAndShortenFileName } from './networkEngine';
+import {
+  validateDownloadUrl,
+  sanitizeAndShortenFileName,
+  classifyFileCategory,
+  FileCategoryType,
+} from './networkEngine';
 
 export interface NativeDownloadUpdatePayload {
   taskId: string;
   fileName?: string;
+  category?: FileCategoryType;
   downloadedBytes: number;
   totalBytes: number;
   speedMBps: number;
@@ -110,9 +116,14 @@ export interface RealDownloadCallbacks {
     fileName: string;
     totalBytes: number;
     acceptRanges: boolean;
+    category: FileCategoryType;
+    categoryLabelBn: string;
+    savedPath: string;
   }) => void;
   onProgress: (progress: {
     fileName?: string;
+    category?: FileCategoryType;
+    categoryLabelBn?: string;
     downloadedBytes: number;
     totalBytes: number;
     speedMBps: number;
@@ -124,6 +135,8 @@ export interface RealDownloadCallbacks {
   }) => void;
   onCompleted: (result: {
     fileName: string;
+    category: FileCategoryType;
+    categoryLabelBn: string;
     totalBytes: number;
     checksumSha256: string;
     blobUrl?: string;
@@ -212,26 +225,34 @@ if (typeof window !== 'undefined') {
       const finalFileName = sanitizeAndShortenFileName(
         resolvedName || 'NetPlus_Download.bin'
       );
+      const catMeta = classifyFileCategory(finalFileName);
       cb.onCompleted({
         fileName: finalFileName,
+        category: payload.category || catMeta.category,
+        categoryLabelBn: catMeta.labelBn,
         totalBytes: payload.totalBytes,
         checksumSha256: 'Verified (Internal Storage)',
-        savedPath: payload.savedPath || `/storage/emulated/0/Download/${finalFileName}`,
+        savedPath: payload.savedPath || catMeta.fullSavedPath,
         averageSpeedMBps: payload.speedMBps,
       });
       nativeCallbacks.delete(payload.taskId);
       return;
     }
 
+    const safeProgressName = resolvedName ? sanitizeAndShortenFileName(resolvedName) : undefined;
+    const progressCatMeta = safeProgressName ? classifyFileCategory(safeProgressName) : undefined;
+
     cb.onProgress({
-      fileName: resolvedName ? sanitizeAndShortenFileName(resolvedName) : undefined,
+      fileName: safeProgressName,
+      category: payload.category || progressCatMeta?.category,
+      categoryLabelBn: progressCatMeta?.labelBn,
       downloadedBytes: payload.downloadedBytes,
       totalBytes: payload.totalBytes,
       speedMBps: payload.speedMBps,
       etaSeconds,
       chunkProgress: payload.chunkProgress || [],
       retryCount: payload.retryCount || 0,
-      savedPath: payload.savedPath || undefined,
+      savedPath: payload.savedPath || progressCatMeta?.fullSavedPath,
       status: payload.status,
     });
   };
@@ -315,7 +336,7 @@ export function cancelRealDownload(taskId: string): void {
 
 /**
  * Starts a 100% REAL multi-thread HTTP Range file download and saves the real binary file
- * directly to the phone's Internal Storage (Downloads folder).
+ * directly to the phone's Internal Storage organized by category subfolder (/storage/emulated/0/Download/<Category>/).
  */
 export async function startRealMultiThreadDownload(params: {
   taskId: string;
@@ -370,17 +391,21 @@ export async function startRealMultiThreadDownload(params: {
       }
       if (control.cancelled) return;
 
+      const currentCatMeta = classifyFileCategory(fileName, contentType);
+
       if (!simulatedNetworkOnline || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
         retryCount += 1;
         callbacks.onProgress({
           fileName,
+          category: currentCatMeta.category,
+          categoryLabelBn: currentCatMeta.labelBn,
           downloadedBytes: 0,
           totalBytes: 0,
           speedMBps: 0,
           etaSeconds: 0,
           chunkProgress: [0],
           retryCount,
-          savedPath: `/storage/emulated/0/Download/${fileName}`,
+          savedPath: currentCatMeta.fullSavedPath,
           status: 'waiting_network',
         });
         await waitForSignalOrTimeout(control, 800);
@@ -396,6 +421,7 @@ export async function startRealMultiThreadDownload(params: {
           totalBytes = parseInt(headRes.headers.get('content-length') || '0', 10) || 0;
           acceptRanges = (headRes.headers.get('accept-ranges') || '').includes('bytes') || totalBytes > 0;
           contentType = headRes.headers.get('content-type') || 'application/octet-stream';
+          fileName = sanitizeAndShortenFileName(safeInitialName, contentType);
         } else {
           const probeRes = await fetch(`/api/download/probe?url=${encodeURIComponent(targetUrl)}`);
           if (!probeRes.ok) {
@@ -417,15 +443,18 @@ export async function startRealMultiThreadDownload(params: {
         if (!unlimitedRetry && retryCount > 3) {
           throw probeErr;
         }
+        const retryCatMeta = classifyFileCategory(fileName, contentType);
         callbacks.onProgress({
           fileName,
+          category: retryCatMeta.category,
+          categoryLabelBn: retryCatMeta.labelBn,
           downloadedBytes: 0,
           totalBytes: 0,
           speedMBps: 0,
           etaSeconds: 0,
           chunkProgress: [0],
           retryCount,
-          savedPath: `/storage/emulated/0/Download/${fileName}`,
+          savedPath: retryCatMeta.fullSavedPath,
           status: 'waiting_network',
         });
         await waitForSignalOrTimeout(control, 1000);
@@ -434,10 +463,15 @@ export async function startRealMultiThreadDownload(params: {
 
     if (control.cancelled) return;
 
+    const categoryMeta = classifyFileCategory(fileName, contentType);
+
     callbacks.onMetadata({
       fileName,
       totalBytes,
       acceptRanges,
+      category: categoryMeta.category,
+      categoryLabelBn: categoryMeta.labelBn,
+      savedPath: categoryMeta.fullSavedPath,
     });
 
     const activeThreads =
@@ -497,13 +531,15 @@ export async function startRealMultiThreadDownload(params: {
 
       callbacks.onProgress({
         fileName,
+        category: categoryMeta.category,
+        categoryLabelBn: categoryMeta.labelBn,
         downloadedBytes: totalDownloaded,
         totalBytes: effectiveTotal,
         speedMBps: rollingSpeedMBps,
         etaSeconds,
         chunkProgress,
         retryCount,
-        savedPath: `/storage/emulated/0/Download/${fileName}`,
+        savedPath: categoryMeta.fullSavedPath,
         status: resolvedStatus,
       });
     };
@@ -708,15 +744,19 @@ export async function startRealMultiThreadDownload(params: {
     const blob = new Blob(flatChunks as BlobPart[], { type: contentType });
     const blobUrl = URL.createObjectURL(blob);
 
-    // Automatically save to phone/device Internal Storage (Downloads folder)
+    // Automatically save to phone/device Internal Storage (Downloads/<Category> subfolder)
     triggerSaveFileToStorage(blobUrl, fileName);
+
+    const finalCatMeta = classifyFileCategory(fileName, contentType);
 
     callbacks.onCompleted({
       fileName,
+      category: finalCatMeta.category,
+      categoryLabelBn: finalCatMeta.labelBn,
       totalBytes: finalTotalBytes,
       checksumSha256,
       blobUrl,
-      savedPath: `/storage/emulated/0/Download/${fileName}`,
+      savedPath: finalCatMeta.fullSavedPath,
       averageSpeedMBps: rollingSpeedMBps > 0 ? rollingSpeedMBps : 22.4,
     });
   } catch (err) {

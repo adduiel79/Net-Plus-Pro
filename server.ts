@@ -73,10 +73,26 @@ async function startServer() {
     );
     const sizeMB = Math.min(50, Math.max(1, parseInt(String(req.query.sizeMB || '8'), 10) || 8));
     const totalBytes = sizeMB * 1024 * 1024;
-    const isMp4 = fileName.toLowerCase().endsWith('.mp4');
+    const lowerName = fileName.toLowerCase();
+    let sampleMime = 'application/octet-stream';
+    if (lowerName.endsWith('.mp4') || lowerName.endsWith('.mkv') || lowerName.endsWith('.webm')) {
+      sampleMime = 'video/mp4';
+    } else if (lowerName.endsWith('.jpg') || lowerName.endsWith('.jpeg')) {
+      sampleMime = 'image/jpeg';
+    } else if (lowerName.endsWith('.png')) {
+      sampleMime = 'image/png';
+    } else if (lowerName.endsWith('.pdf')) {
+      sampleMime = 'application/pdf';
+    } else if (lowerName.endsWith('.zip') || lowerName.endsWith('.rar') || lowerName.endsWith('.7z')) {
+      sampleMime = 'application/zip';
+    } else if (lowerName.endsWith('.apk')) {
+      sampleMime = 'application/vnd.android.package-archive';
+    } else if (lowerName.endsWith('.mp3')) {
+      sampleMime = 'audio/mpeg';
+    }
 
     res.setHeader('Accept-Ranges', 'bytes');
-    res.setHeader('Content-Type', isMp4 ? 'video/mp4' : 'application/octet-stream');
+    res.setHeader('Content-Type', sampleMime);
     res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
     res.setHeader('Cache-Control', 'no-store');
 
