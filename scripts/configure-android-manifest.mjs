@@ -98,7 +98,7 @@ if (fs.existsSync(manifestPath)) {
   console.log('Successfully injected Net Plus Pro permissions & Browser Download Interceptor into AndroidManifest.xml');
 }
 
-// Inject Native Multi-Thread Internal Storage Downloader & Permission Manager into MainActivity.java
+// Inject High-Speed Native Multi-Thread Downloader, Auto-Reconnect & Auto Storage Permission Prompt into MainActivity.java
 const mainActivityDir = path.join(
   process.cwd(),
   'android',
@@ -116,9 +116,14 @@ if (fs.existsSync(mainActivityDir)) {
   const javaCode = `package com.netplus.pro;
 
 import android.Manifest;
+import android.app.AlertDialog;
+import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.media.MediaScannerConnection;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -135,6 +140,7 @@ import com.getcapacitor.BridgeActivity;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
@@ -149,19 +155,23 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 public class MainActivity extends BridgeActivity {
     private final ExecutorService downloadPool = Executors.newCachedThreadPool();
     private final Map<String, AtomicBoolean> pausedTasks = new ConcurrentHashMap<>();
     private final Map<String, AtomicBoolean> cancelledTasks = new ConcurrentHashMap<>();
+    private final Object stateLock = new Object();
+    private final AtomicBoolean isNetworkAvailable = new AtomicBoolean(true);
+    private boolean promptedStorageThisSession = false;
     private String pendingInterceptedUrl = null;
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         handleIncomingIntent(getIntent());
-        requestInitialRuntimePermissions();
+        registerRealTimeNetworkMonitor();
 
         if (getBridge() != null && getBridge().getWebView() != null) {
             WebView webView = getBridge().getWebView();
@@ -169,12 +179,16 @@ public class MainActivity extends BridgeActivity {
             webView.getSettings().setDomStorageEnabled(true);
             webView.addJavascriptInterface(new NativeDownloadBridge(), "NetPlusNativeDownloader");
         }
+
+        // Automatically prompt for storage & notification permissions when the app is installed & opened
+        autoPromptStoragePermissionOnLaunch();
     }
 
     @Override
     public void onResume() {
         super.onResume();
         notifyPermissionStateToJs();
+        wakeUpWaitingDownloads();
     }
 
     @Override
@@ -184,7 +198,58 @@ public class MainActivity extends BridgeActivity {
         handleIncomingIntent(intent);
     }
 
-    private void requestInitialRuntimePermissions() {
+    private void wakeUpWaitingDownloads() {
+        synchronized (stateLock) {
+            stateLock.notifyAll();
+        }
+    }
+
+    private void registerRealTimeNetworkMonitor() {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                cm.registerDefaultNetworkCallback(new ConnectivityManager.NetworkCallback() {
+                    @Override
+                    public void onAvailable(Network network) {
+                        isNetworkAvailable.set(true);
+                        wakeUpWaitingDownloads();
+                        notifyNetworkStateToJs(true);
+                    }
+
+                    @Override
+                    public void onLost(Network network) {
+                        isNetworkAvailable.set(false);
+                        notifyNetworkStateToJs(false);
+                    }
+                });
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private boolean isCurrentlyOnline() {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) return true;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                Network net = cm.getActiveNetwork();
+                if (net == null) return false;
+                NetworkCapabilities caps = cm.getNetworkCapabilities(net);
+                return caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
+            }
+        } catch (Exception ignored) {}
+        return isNetworkAvailable.get();
+    }
+
+    private void notifyNetworkStateToJs(final boolean online) {
+        if (getBridge() == null || getBridge().getWebView() == null) return;
+        final WebView webView = getBridge().getWebView();
+        webView.post(() -> webView.evaluateJavascript(
+            "if (window.__onNativeNetworkStateChanged) { window.__onNativeNetworkStateChanged(" + online + "); }",
+            null
+        ));
+    }
+
+    private void autoPromptStoragePermissionOnLaunch() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             List<String> needed = new ArrayList<>();
             if (Build.VERSION.SDK_INT <= 32) {
@@ -199,11 +264,68 @@ public class MainActivity extends BridgeActivity {
                 if (checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
                     needed.add("android.permission.POST_NOTIFICATIONS");
                 }
+                if (checkSelfPermission("android.permission.READ_MEDIA_VIDEO") != PackageManager.PERMISSION_GRANTED) {
+                    needed.add("android.permission.READ_MEDIA_VIDEO");
+                }
+                if (checkSelfPermission("android.permission.READ_MEDIA_AUDIO") != PackageManager.PERMISSION_GRANTED) {
+                    needed.add("android.permission.READ_MEDIA_AUDIO");
+                }
+                if (checkSelfPermission("android.permission.READ_MEDIA_IMAGES") != PackageManager.PERMISSION_GRANTED) {
+                    needed.add("android.permission.READ_MEDIA_IMAGES");
+                }
             }
             if (!needed.isEmpty()) {
                 requestPermissions(needed.toArray(new String[0]), 1001);
             }
         }
+
+        // On Android 11+ (API 30+), automatically show a friendly prompt on first launch if All Files Access is not yet enabled
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager() && !promptedStorageThisSession) {
+            promptedStorageThisSession = true;
+            runOnUiThread(() -> {
+                try {
+                    new AlertDialog.Builder(MainActivity.this)
+                        .setTitle("স্টোরেজ পারমিশন প্রয়োজন (Storage Permission)")
+                        .setMessage("ফোনের Internal Storage (Download ফোল্ডার)-এ হাই-স্পিডে সকল ফাইল ডাউনলোড ও সেভ করার জন্য 'Allow access to manage all files' পারমিশনটি চালু করে দিন।")
+                        .setCancelable(true)
+                        .setPositiveButton("পারমিশন চালু করুন (Allow)", (dialog, which) -> openAllFilesAccessSettings())
+                        .setNegativeButton("পরে", (dialog, which) -> dialog.dismiss())
+                        .show();
+                } catch (Exception ignored) {}
+            });
+        }
+    }
+
+    private void openAllFilesAccessSettings() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                try {
+                    Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
+                    intent.setData(Uri.parse("package:" + getPackageName()));
+                    startActivity(intent);
+                    return;
+                } catch (Exception e) {
+                    Intent intent = new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION);
+                    startActivity(intent);
+                    return;
+                }
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                requestPermissions(
+                    new String[]{
+                        Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                        Manifest.permission.READ_EXTERNAL_STORAGE
+                    },
+                    1002
+                );
+                return;
+            }
+        } catch (Exception ignored) {}
+
+        try {
+            Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+            intent.setData(Uri.parse("package:" + getPackageName()));
+            startActivity(intent);
+        } catch (Exception ignored) {}
     }
 
     private boolean checkHasStoragePermissionInternal() {
@@ -279,9 +401,6 @@ public class MainActivity extends BridgeActivity {
         return ".bin";
     }
 
-    /**
-     * Strictly caps the filename at <= 50 characters so Linux/Android FUSE/ext4 NEVER throws ENAMETOOLONG.
-     */
     private static String buildShortSafeFileName(String requestedName, String guessedName, String contentType) {
         String candidate = (guessedName != null && !guessedName.isEmpty() && !"downloadfile.bin".equalsIgnoreCase(guessedName))
             ? guessedName
@@ -327,36 +446,7 @@ public class MainActivity extends BridgeActivity {
 
         @JavascriptInterface
         public void requestStoragePermission() {
-            try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    if (!Environment.isExternalStorageManager()) {
-                        try {
-                            Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION);
-                            intent.setData(Uri.parse("package:" + getPackageName()));
-                            startActivity(intent);
-                        } catch (Exception e) {
-                            Intent intent = new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION);
-                            startActivity(intent);
-                        }
-                    } else {
-                        notifyPermissionStateToJs();
-                    }
-                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                    requestPermissions(
-                        new String[]{
-                            Manifest.permission.WRITE_EXTERNAL_STORAGE,
-                            Manifest.permission.READ_EXTERNAL_STORAGE
-                        },
-                        1002
-                    );
-                }
-            } catch (Exception e) {
-                try {
-                    Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
-                    intent.setData(Uri.parse("package:" + getPackageName()));
-                    startActivity(intent);
-                } catch (Exception ignored) {}
-            }
+            openAllFilesAccessSettings();
         }
 
         @JavascriptInterface
@@ -383,13 +473,28 @@ public class MainActivity extends BridgeActivity {
         @JavascriptInterface
         public void pauseDownload(String taskId) {
             AtomicBoolean flag = pausedTasks.get(taskId);
-            if (flag != null) flag.set(true);
+            if (flag != null) {
+                flag.set(true);
+            }
+            wakeUpWaitingDownloads();
+        }
+
+        @JavascriptInterface
+        public void resumeDownload(String taskId) {
+            AtomicBoolean flag = pausedTasks.get(taskId);
+            if (flag != null) {
+                flag.set(false);
+            }
+            wakeUpWaitingDownloads();
         }
 
         @JavascriptInterface
         public void cancelDownload(String taskId) {
             AtomicBoolean flag = cancelledTasks.get(taskId);
-            if (flag != null) flag.set(true);
+            if (flag != null) {
+                flag.set(true);
+            }
+            wakeUpWaitingDownloads();
         }
 
         @JavascriptInterface
@@ -422,37 +527,76 @@ public class MainActivity extends BridgeActivity {
             cancelledTasks.put(taskId, new AtomicBoolean(false));
 
             downloadPool.submit(() -> {
-                try {
-                    int threads = Math.max(1, Math.min(32, threadCount));
-                    // 1. Probe URL with Range: bytes=0-0
-                    HttpURLConnection probeConn = (HttpURLConnection) new URL(urlStr).openConnection();
-                    probeConn.setInstanceFollowRedirects(true);
-                    probeConn.setConnectTimeout(15000);
-                    probeConn.setReadTimeout(20000);
-                    probeConn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 15) Chrome/131.0.0.0 Mobile NetPlusPro/2.5");
-                    probeConn.setRequestProperty("Range", "bytes=0-0");
-                    int status = probeConn.getResponseCode();
-                    String finalUrl = probeConn.getURL().toString();
-                    String contentRange = probeConn.getHeaderField("Content-Range");
-                    String acceptRanges = probeConn.getHeaderField("Accept-Ranges");
-                    String contentDisposition = probeConn.getHeaderField("Content-Disposition");
-                    String contentType = probeConn.getContentType();
+                final AtomicInteger retryCounter = new AtomicInteger(0);
+                String finalUrl = urlStr;
+                long totalBytes = -1;
+                boolean supportsRanges = false;
+                String contentDisposition = null;
+                String contentType = null;
 
-                    long totalBytes = -1;
-                    boolean supportsRanges = (status == 206) || (acceptRanges != null && acceptRanges.toLowerCase().contains("bytes"));
-
-                    if (contentRange != null && contentRange.contains("/")) {
-                        String totalPart = contentRange.substring(contentRange.lastIndexOf('/') + 1).trim();
-                        if (!"*".equals(totalPart)) {
-                            totalBytes = Long.parseLong(totalPart);
-                            supportsRanges = true;
+                // 1. Resilient Probe Loop: Automatically waits & retries if internet is off
+                while (!cancelledTasks.get(taskId).get()) {
+                    while (pausedTasks.get(taskId).get() && !cancelledTasks.get(taskId).get()) {
+                        synchronized (stateLock) {
+                            try { stateLock.wait(300); } catch (InterruptedException ignored) {}
                         }
                     }
-                    if (totalBytes <= 0) {
-                        totalBytes = probeConn.getContentLengthLong();
-                    }
-                    probeConn.disconnect();
+                    if (cancelledTasks.get(taskId).get()) return;
 
+                    if (!isCurrentlyOnline()) {
+                        emitProgress(taskId, requestedName, 0, 0, 0.0, new long[]{0}, new long[]{1}, "waiting_network", "", "", retryCounter.incrementAndGet());
+                        synchronized (stateLock) {
+                            try { stateLock.wait(1200); } catch (InterruptedException ignored) {}
+                        }
+                        continue;
+                    }
+
+                    HttpURLConnection probeConn = null;
+                    try {
+                        probeConn = (HttpURLConnection) new URL(urlStr).openConnection();
+                        probeConn.setInstanceFollowRedirects(true);
+                        probeConn.setUseCaches(false);
+                        probeConn.setConnectTimeout(12000);
+                        probeConn.setReadTimeout(15000);
+                        probeConn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 15) Chrome/131.0.0.0 Mobile NetPlusPro/2.5");
+                        probeConn.setRequestProperty("Accept-Encoding", "identity");
+                        probeConn.setRequestProperty("Connection", "keep-alive");
+                        probeConn.setRequestProperty("Range", "bytes=0-0");
+
+                        int status = probeConn.getResponseCode();
+                        finalUrl = probeConn.getURL().toString();
+                        String contentRange = probeConn.getHeaderField("Content-Range");
+                        String acceptRanges = probeConn.getHeaderField("Accept-Ranges");
+                        contentDisposition = probeConn.getHeaderField("Content-Disposition");
+                        contentType = probeConn.getContentType();
+
+                        supportsRanges = (status == 206) || (acceptRanges != null && acceptRanges.toLowerCase().contains("bytes"));
+
+                        if (contentRange != null && contentRange.contains("/")) {
+                            String totalPart = contentRange.substring(contentRange.lastIndexOf('/') + 1).trim();
+                            if (!"*".equals(totalPart)) {
+                                totalBytes = Long.parseLong(totalPart);
+                                supportsRanges = true;
+                            }
+                        }
+                        if (totalBytes <= 0) {
+                            totalBytes = probeConn.getContentLengthLong();
+                        }
+                        break; // Probe succeeded!
+                    } catch (Exception probeEx) {
+                        emitProgress(taskId, requestedName, 0, 0, 0.0, new long[]{0}, new long[]{1}, "waiting_network", "", "", retryCounter.incrementAndGet());
+                        synchronized (stateLock) {
+                            try { stateLock.wait(1500); } catch (InterruptedException ignored) {}
+                        }
+                    } finally {
+                        if (probeConn != null) probeConn.disconnect();
+                    }
+                }
+
+                if (cancelledTasks.get(taskId).get()) return;
+
+                try {
+                    int threads = Math.max(1, Math.min(32, threadCount));
                     String guessedName = URLUtil.guessFileName(finalUrl, contentDisposition, contentType);
                     String safeName = buildShortSafeFileName(requestedName, guessedName, contentType);
 
@@ -462,7 +606,6 @@ public class MainActivity extends BridgeActivity {
                     }
                     File outFile = createUniqueOutputFile(downloadDir, safeName);
 
-                    // Verify we can write to public Download folder; if restricted, fallback to app-accessible external Download dir
                     try {
                         try (RandomAccessFile testRaf = new RandomAccessFile(outFile, "rw")) {
                             testRaf.seek(0);
@@ -476,17 +619,20 @@ public class MainActivity extends BridgeActivity {
                     }
 
                     final File targetFile = outFile;
+                    final String resolvedUrl = finalUrl;
                     final AtomicLong downloadedBytes = new AtomicLong(0);
-                    final long startTimeMs = System.currentTimeMillis();
                     final long finalTotalBytes = totalBytes;
-                    final int activeThreads = (supportsRanges && totalBytes > 256 * 1024) ? threads : 1;
+                    final int activeThreads = (supportsRanges && totalBytes > 128 * 1024) ? threads : 1;
                     final long[] chunkDone = new long[activeThreads];
                     final long[] chunkSize = new long[activeThreads];
+                    final AtomicBoolean anyWorkerWaitingNetwork = new AtomicBoolean(false);
+
+                    // Rolling window speed tracker so pauses or initial connect never lower MB/s speed
+                    long lastTickMs = System.currentTimeMillis();
+                    long lastTickBytes = 0;
+                    double rollingSpeedMBps = 0.0;
 
                     if (activeThreads > 1) {
-                        try (RandomAccessFile raf = new RandomAccessFile(targetFile, "rw")) {
-                            raf.setLength(totalBytes);
-                        }
                         long partSize = totalBytes / activeThreads;
                         Future<?>[] futures = new Future<?>[activeThreads];
 
@@ -497,40 +643,100 @@ public class MainActivity extends BridgeActivity {
                             chunkSize[idx] = endByte - startByte + 1;
 
                             futures[i] = downloadPool.submit(() -> {
-                                long offset = startByte;
-                                while (offset <= endByte) {
+                                // Use a 512 KB per-thread RAM write buffer to eliminate Android FUSE IPC bottleneck!
+                                final int FLUSH_THRESHOLD = 512 * 1024;
+                                byte[] ramWriteBuffer = new byte[FLUSH_THRESHOLD + 131072];
+                                byte[] netReadBuffer = new byte[128 * 1024];
+
+                                while (chunkDone[idx] < chunkSize[idx] && !cancelledTasks.get(taskId).get()) {
+                                    // If paused, wait cleanly until resumed
+                                    while (pausedTasks.get(taskId).get() && !cancelledTasks.get(taskId).get()) {
+                                        synchronized (stateLock) {
+                                            try { stateLock.wait(250); } catch (InterruptedException ignored) {}
+                                        }
+                                    }
                                     if (cancelledTasks.get(taskId).get()) return;
-                                    if (pausedTasks.get(taskId).get()) {
-                                        try { Thread.sleep(300); } catch (InterruptedException ignored) {}
+
+                                    if (!isCurrentlyOnline()) {
+                                        anyWorkerWaitingNetwork.set(true);
+                                        retryCounter.incrementAndGet();
+                                        synchronized (stateLock) {
+                                            try { stateLock.wait(1200); } catch (InterruptedException ignored) {}
+                                        }
                                         continue;
                                     }
-                                    HttpURLConnection partConn = null;
-                                    try {
-                                        partConn = (HttpURLConnection) new URL(finalUrl).openConnection();
-                                        partConn.setInstanceFollowRedirects(true);
-                                        partConn.setConnectTimeout(15000);
-                                        partConn.setReadTimeout(20000);
-                                        partConn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 15) Chrome/131.0.0.0 Mobile NetPlusPro/2.5");
-                                        partConn.setRequestProperty("Range", "bytes=" + offset + "-" + endByte);
 
-                                        try (InputStream is = partConn.getInputStream();
+                                    HttpURLConnection partConn = null;
+                                    int bufferedCount = 0;
+                                    long writeStartOffset = startByte + chunkDone[idx];
+
+                                    try {
+                                        long currentOffset = startByte + chunkDone[idx];
+                                        partConn = (HttpURLConnection) new URL(resolvedUrl).openConnection();
+                                        partConn.setInstanceFollowRedirects(true);
+                                        partConn.setUseCaches(false);
+                                        partConn.setConnectTimeout(12000);
+                                        partConn.setReadTimeout(15000);
+                                        partConn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 15) Chrome/131.0.0.0 Mobile NetPlusPro/2.5");
+                                        partConn.setRequestProperty("Accept-Encoding", "identity");
+                                        partConn.setRequestProperty("Connection", "keep-alive");
+                                        partConn.setRequestProperty("Range", "bytes=" + currentOffset + "-" + endByte);
+
+                                        int code = partConn.getResponseCode();
+                                        if (code != 206 && code != 200) {
+                                            throw new Exception("HTTP " + code);
+                                        }
+                                        // If server ignored Range header on thread > 0, abort secondary thread
+                                        if (code == 200 && idx > 0) {
+                                            chunkDone[idx] = chunkSize[idx];
+                                            return;
+                                        }
+
+                                        anyWorkerWaitingNetwork.set(false);
+
+                                        try (InputStream is = new BufferedInputStream(partConn.getInputStream(), 256 * 1024);
                                              RandomAccessFile partFile = new RandomAccessFile(targetFile, "rw")) {
-                                            partFile.seek(offset);
-                                            byte[] buffer = new byte[64 * 1024];
+                                            writeStartOffset = startByte + chunkDone[idx];
                                             int read;
-                                            while ((read = is.read(buffer)) != -1) {
+                                            while ((read = is.read(netReadBuffer)) != -1) {
                                                 if (cancelledTasks.get(taskId).get()) return;
-                                                while (pausedTasks.get(taskId).get()) {
-                                                    Thread.sleep(250);
+
+                                                long remainingNeeded = chunkSize[idx] - chunkDone[idx];
+                                                int bytesToTake = (int) Math.min((long) read, remainingNeeded);
+                                                if (bytesToTake <= 0) break;
+
+                                                System.arraycopy(netReadBuffer, 0, ramWriteBuffer, bufferedCount, bytesToTake);
+                                                bufferedCount += bytesToTake;
+                                                chunkDone[idx] += bytesToTake;
+                                                downloadedBytes.addAndGet(bytesToTake);
+
+                                                // Flush in large 512 KB blocks or when pausing/finishing
+                                                if (bufferedCount >= FLUSH_THRESHOLD || pausedTasks.get(taskId).get() || chunkDone[idx] >= chunkSize[idx]) {
+                                                    partFile.seek(writeStartOffset);
+                                                    partFile.write(ramWriteBuffer, 0, bufferedCount);
+                                                    writeStartOffset += bufferedCount;
+                                                    bufferedCount = 0;
                                                 }
-                                                partFile.write(buffer, 0, read);
-                                                offset += read;
-                                                chunkDone[idx] += read;
-                                                downloadedBytes.addAndGet(read);
+
+                                                // If user pressed Pause, break out after flushing so connection closes cleanly
+                                                if (pausedTasks.get(taskId).get()) {
+                                                    break;
+                                                }
+                                            }
+
+                                            if (bufferedCount > 0) {
+                                                partFile.seek(writeStartOffset);
+                                                partFile.write(ramWriteBuffer, 0, bufferedCount);
+                                                writeStartOffset += bufferedCount;
+                                                bufferedCount = 0;
                                             }
                                         }
                                     } catch (Exception retryEx) {
-                                        try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
+                                        anyWorkerWaitingNetwork.set(true);
+                                        retryCounter.incrementAndGet();
+                                        synchronized (stateLock) {
+                                            try { stateLock.wait(1000); } catch (InterruptedException ignored) {}
+                                        }
                                     } finally {
                                         if (partConn != null) partConn.disconnect();
                                     }
@@ -547,35 +753,115 @@ public class MainActivity extends BridgeActivity {
                                     break;
                                 }
                             }
-                            emitProgress(taskId, targetFile.getName(), downloadedBytes.get(), finalTotalBytes, startTimeMs, chunkDone, chunkSize, "downloading", targetFile.getAbsolutePath(), "");
+
+                            long now = System.currentTimeMillis();
+                            long currBytes = downloadedBytes.get();
+                            long dt = now - lastTickMs;
+                            if (dt >= 200) {
+                                double instantMBps = ((currBytes - lastTickBytes) / (1024.0 * 1024.0)) / (dt / 1000.0);
+                                if (pausedTasks.get(taskId).get() || !isCurrentlyOnline()) {
+                                    rollingSpeedMBps = 0.0;
+                                } else if (instantMBps > 0) {
+                                    rollingSpeedMBps = rollingSpeedMBps > 0
+                                        ? (instantMBps * 0.7 + rollingSpeedMBps * 0.3)
+                                        : instantMBps;
+                                }
+                                lastTickMs = now;
+                                lastTickBytes = currBytes;
+                            }
+
+                            String currentStatus = "downloading";
+                            if (pausedTasks.get(taskId).get()) {
+                                currentStatus = "paused";
+                            } else if (!isCurrentlyOnline() || (anyWorkerWaitingNetwork.get() && rollingSpeedMBps < 0.05)) {
+                                currentStatus = "waiting_network";
+                            }
+
+                            emitProgress(taskId, targetFile.getName(), currBytes, finalTotalBytes, rollingSpeedMBps, chunkDone, chunkSize, currentStatus, targetFile.getAbsolutePath(), "", retryCounter.get());
                             try { Thread.sleep(200); } catch (InterruptedException ignored) {}
                         }
                     } else {
-                        HttpURLConnection conn = (HttpURLConnection) new URL(finalUrl).openConnection();
-                        conn.setInstanceFollowRedirects(true);
-                        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 15) Chrome/131.0.0.0 Mobile NetPlusPro/2.5");
-                        try (InputStream is = conn.getInputStream();
-                             FileOutputStream fos = new FileOutputStream(targetFile)) {
-                            byte[] buf = new byte[64 * 1024];
-                            int read;
-                            long lastEmit = 0;
-                            while ((read = is.read(buf)) != -1) {
-                                if (cancelledTasks.get(taskId).get()) return;
-                                while (pausedTasks.get(taskId).get()) {
-                                    Thread.sleep(250);
-                                }
-                                fos.write(buf, 0, read);
-                                long curr = downloadedBytes.addAndGet(read);
-                                chunkDone[0] = curr;
-                                chunkSize[0] = finalTotalBytes > 0 ? finalTotalBytes : curr;
-                                long now = System.currentTimeMillis();
-                                if (now - lastEmit >= 200) {
-                                    lastEmit = now;
-                                    emitProgress(taskId, targetFile.getName(), curr, finalTotalBytes > 0 ? finalTotalBytes : curr, startTimeMs, chunkDone, chunkSize, "downloading", targetFile.getAbsolutePath(), "");
+                        // Single-stream resilient range-resume fallback
+                        byte[] netReadBuffer = new byte[128 * 1024];
+                        while (!cancelledTasks.get(taskId).get()) {
+                            while (pausedTasks.get(taskId).get() && !cancelledTasks.get(taskId).get()) {
+                                emitProgress(taskId, targetFile.getName(), downloadedBytes.get(), finalTotalBytes > 0 ? finalTotalBytes : downloadedBytes.get(), 0.0, chunkDone, chunkSize, "paused", targetFile.getAbsolutePath(), "", retryCounter.get());
+                                synchronized (stateLock) {
+                                    try { stateLock.wait(250); } catch (InterruptedException ignored) {}
                                 }
                             }
-                        } finally {
-                            conn.disconnect();
+                            if (cancelledTasks.get(taskId).get()) return;
+
+                            if (!isCurrentlyOnline()) {
+                                emitProgress(taskId, targetFile.getName(), downloadedBytes.get(), finalTotalBytes > 0 ? finalTotalBytes : downloadedBytes.get(), 0.0, chunkDone, chunkSize, "waiting_network", targetFile.getAbsolutePath(), "", retryCounter.incrementAndGet());
+                                synchronized (stateLock) {
+                                    try { stateLock.wait(1200); } catch (InterruptedException ignored) {}
+                                }
+                                continue;
+                            }
+
+                            HttpURLConnection conn = null;
+                            try {
+                                long currentOffset = downloadedBytes.get();
+                                conn = (HttpURLConnection) new URL(resolvedUrl).openConnection();
+                                conn.setInstanceFollowRedirects(true);
+                                conn.setUseCaches(false);
+                                conn.setConnectTimeout(12000);
+                                conn.setReadTimeout(15000);
+                                conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 15) Chrome/131.0.0.0 Mobile NetPlusPro/2.5");
+                                conn.setRequestProperty("Accept-Encoding", "identity");
+                                if (currentOffset > 0) {
+                                    conn.setRequestProperty("Range", "bytes=" + currentOffset + "-");
+                                }
+
+                                int respCode = conn.getResponseCode();
+                                boolean appendMode = (respCode == 206 && currentOffset > 0);
+                                if (!appendMode && currentOffset > 0) {
+                                    downloadedBytes.set(0);
+                                    currentOffset = 0;
+                                }
+
+                                try (InputStream is = new BufferedInputStream(conn.getInputStream(), 256 * 1024);
+                                     FileOutputStream fos = new FileOutputStream(targetFile, appendMode)) {
+                                    int read;
+                                    while ((read = is.read(netReadBuffer)) != -1) {
+                                        if (cancelledTasks.get(taskId).get()) return;
+                                        fos.write(netReadBuffer, 0, read);
+                                        long curr = downloadedBytes.addAndGet(read);
+                                        chunkDone[0] = curr;
+                                        chunkSize[0] = finalTotalBytes > 0 ? finalTotalBytes : curr;
+
+                                        long now = System.currentTimeMillis();
+                                        long dt = now - lastTickMs;
+                                        if (dt >= 200) {
+                                            double instantMBps = ((curr - lastTickBytes) / (1024.0 * 1024.0)) / (dt / 1000.0);
+                                            rollingSpeedMBps = rollingSpeedMBps > 0
+                                                ? (instantMBps * 0.7 + rollingSpeedMBps * 0.3)
+                                                : instantMBps;
+                                            lastTickMs = now;
+                                            lastTickBytes = curr;
+                                            emitProgress(taskId, targetFile.getName(), curr, finalTotalBytes > 0 ? finalTotalBytes : curr, rollingSpeedMBps, chunkDone, chunkSize, "downloading", targetFile.getAbsolutePath(), "", retryCounter.get());
+                                        }
+
+                                        if (pausedTasks.get(taskId).get()) {
+                                            fos.flush();
+                                            break;
+                                        }
+                                    }
+                                    fos.flush();
+                                }
+
+                                if (!pausedTasks.get(taskId).get() && (finalTotalBytes <= 0 || downloadedBytes.get() >= finalTotalBytes)) {
+                                    break;
+                                }
+                            } catch (Exception e) {
+                                emitProgress(taskId, targetFile.getName(), downloadedBytes.get(), finalTotalBytes > 0 ? finalTotalBytes : downloadedBytes.get(), 0.0, chunkDone, chunkSize, "waiting_network", targetFile.getAbsolutePath(), "", retryCounter.incrementAndGet());
+                                synchronized (stateLock) {
+                                    try { stateLock.wait(1200); } catch (InterruptedException ignored) {}
+                                }
+                            } finally {
+                                if (conn != null) conn.disconnect();
+                            }
                         }
                     }
 
@@ -587,19 +873,17 @@ public class MainActivity extends BridgeActivity {
                             null
                         );
                         long finalBytes = downloadedBytes.get();
-                        emitProgress(taskId, targetFile.getName(), finalBytes, finalTotalBytes > 0 ? finalTotalBytes : finalBytes, startTimeMs, chunkDone, chunkSize, "completed", targetFile.getAbsolutePath(), "");
+                        emitProgress(taskId, targetFile.getName(), finalBytes, finalTotalBytes > 0 ? finalTotalBytes : finalBytes, rollingSpeedMBps, chunkDone, chunkSize, "completed", targetFile.getAbsolutePath(), "", retryCounter.get());
                     }
                 } catch (Exception e) {
-                    emitProgress(taskId, "", 0, 0, System.currentTimeMillis(), new long[]{0}, new long[]{1}, "error", "", e.getMessage() != null ? e.getMessage() : "Download error");
+                    emitProgress(taskId, "", 0, 0, 0.0, new long[]{0}, new long[]{1}, "error", "", e.getMessage() != null ? e.getMessage() : "Download error", retryCounter.get());
                 }
             });
         }
 
-        private void emitProgress(String taskId, String resolvedName, long dlBytes, long totalBytes, long startMs, long[] chunkDone, long[] chunkSize, String status, String savedPath, String error) {
+        private void emitProgress(String taskId, String resolvedName, long dlBytes, long totalBytes, double speedMBps, long[] chunkDone, long[] chunkSize, String status, String savedPath, String error, int retryCount) {
             if (getBridge() == null || getBridge().getWebView() == null) return;
             final WebView webView = getBridge().getWebView();
-            long elapsedMs = Math.max(100, System.currentTimeMillis() - startMs);
-            double speedMBps = (dlBytes / (1024.0 * 1024.0)) / (elapsedMs / 1000.0);
 
             try {
                 JSONObject payload = new JSONObject();
@@ -611,6 +895,7 @@ public class MainActivity extends BridgeActivity {
                 payload.put("status", status);
                 payload.put("savedPath", savedPath);
                 payload.put("error", error);
+                payload.put("retryCount", retryCount);
 
                 JSONArray chunksArr = new JSONArray();
                 for (int i = 0; i < chunkDone.length; i++) {
@@ -631,7 +916,7 @@ public class MainActivity extends BridgeActivity {
 }
 `;
   fs.writeFileSync(mainActivityPath, javaCode, 'utf8');
-  console.log('Successfully generated native multi-thread Internal Storage downloader & permission manager in MainActivity.java');
+  console.log('Successfully generated high-speed 512KB-buffered multi-thread downloader, pause/resume, auto-reconnect & launch permission manager in MainActivity.java');
 }
 
 // Resize and copy the custom Net Plus Pro logo into Android mipmap launcher icon directories

@@ -6,10 +6,11 @@ export interface NativeDownloadUpdatePayload {
   downloadedBytes: number;
   totalBytes: number;
   speedMBps: number;
-  status: 'downloading' | 'completed' | 'error';
+  status: 'downloading' | 'paused' | 'waiting_network' | 'completed' | 'error';
   savedPath: string;
   error: string;
   chunkProgress: number[];
+  retryCount?: number;
 }
 
 interface NetPlusNativeDownloaderBridge {
@@ -24,6 +25,7 @@ interface NetPlusNativeDownloaderBridge {
     threads: number
   ) => void;
   pauseDownload: (taskId: string) => void;
+  resumeDownload?: (taskId: string) => void;
   cancelDownload: (taskId: string) => void;
   saveBase64ToDownloads?: (base64Data: string, fileName: string) => string;
 }
@@ -34,6 +36,7 @@ declare global {
     __onNativeDownloadUpdate?: (payload: NativeDownloadUpdatePayload) => void;
     __onBrowserDownloadIntercepted?: (url: string) => void;
     __onStoragePermissionChanged?: (granted: boolean) => void;
+    __onNativeNetworkStateChanged?: (online: boolean) => void;
   }
 }
 
@@ -88,6 +91,7 @@ export interface RealDownloadCallbacks {
     chunkProgress: number[];
     retryCount: number;
     savedPath?: string;
+    status?: 'downloading' | 'paused' | 'waiting_network';
   }) => void;
   onCompleted: (result: {
     fileName: string;
@@ -104,10 +108,47 @@ interface ActiveTaskControl {
   paused: boolean;
   cancelled: boolean;
   abortControllers: Set<AbortController>;
+  wakeListeners: Set<() => void>;
 }
 
 const activeControls = new Map<string, ActiveTaskControl>();
 const nativeCallbacks = new Map<string, RealDownloadCallbacks>();
+let simulatedNetworkOnline = true;
+
+function wakeTaskControl(ctrl: ActiveTaskControl) {
+  for (const wake of ctrl.wakeListeners) {
+    wake();
+  }
+  ctrl.wakeListeners.clear();
+}
+
+function waitForSignalOrTimeout(ctrl: ActiveTaskControl, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      ctrl.wakeListeners.delete(onWake);
+      resolve();
+    }, ms);
+    const onWake = () => {
+      clearTimeout(timer);
+      ctrl.wakeListeners.delete(onWake);
+      resolve();
+    };
+    ctrl.wakeListeners.add(onWake);
+  });
+}
+
+export function setGlobalDownloaderNetworkState(online: boolean): void {
+  simulatedNetworkOnline = online;
+  for (const ctrl of activeControls.values()) {
+    if (!online) {
+      for (const ac of ctrl.abortControllers) {
+        ac.abort();
+      }
+    } else {
+      wakeTaskControl(ctrl);
+    }
+  }
+}
 
 // Register global listener for Android Native Bridge updates if inside APK
 if (typeof window !== 'undefined') {
@@ -131,17 +172,6 @@ if (typeof window !== 'undefined') {
       payload.fileName ||
       (payload.savedPath ? payload.savedPath.split('/').pop() : undefined);
 
-    cb.onProgress({
-      fileName: resolvedName ? sanitizeAndShortenFileName(resolvedName) : undefined,
-      downloadedBytes: payload.downloadedBytes,
-      totalBytes: payload.totalBytes,
-      speedMBps: payload.speedMBps,
-      etaSeconds,
-      chunkProgress: payload.chunkProgress || [],
-      retryCount: 0,
-      savedPath: payload.savedPath || undefined,
-    });
-
     if (payload.status === 'completed') {
       const finalFileName = sanitizeAndShortenFileName(
         resolvedName || 'NetPlus_Download.bin'
@@ -154,7 +184,20 @@ if (typeof window !== 'undefined') {
         averageSpeedMBps: payload.speedMBps,
       });
       nativeCallbacks.delete(payload.taskId);
+      return;
     }
+
+    cb.onProgress({
+      fileName: resolvedName ? sanitizeAndShortenFileName(resolvedName) : undefined,
+      downloadedBytes: payload.downloadedBytes,
+      totalBytes: payload.totalBytes,
+      speedMBps: payload.speedMBps,
+      etaSeconds,
+      chunkProgress: payload.chunkProgress || [],
+      retryCount: payload.retryCount || 0,
+      savedPath: payload.savedPath || undefined,
+      status: payload.status,
+    });
   };
 }
 
@@ -201,9 +244,20 @@ export function setRealDownloadPaused(taskId: string, paused: boolean): void {
   const ctrl = activeControls.get(taskId);
   if (ctrl) {
     ctrl.paused = paused;
+    if (paused) {
+      for (const ac of ctrl.abortControllers) {
+        ac.abort();
+      }
+    } else {
+      wakeTaskControl(ctrl);
+    }
   }
-  if (typeof window !== 'undefined' && window.NetPlusNativeDownloader && paused) {
-    window.NetPlusNativeDownloader.pauseDownload(taskId);
+  if (typeof window !== 'undefined' && window.NetPlusNativeDownloader) {
+    if (paused) {
+      window.NetPlusNativeDownloader.pauseDownload(taskId);
+    } else if (window.NetPlusNativeDownloader.resumeDownload) {
+      window.NetPlusNativeDownloader.resumeDownload(taskId);
+    }
   }
 }
 
@@ -214,6 +268,7 @@ export function cancelRealDownload(taskId: string): void {
     for (const ac of ctrl.abortControllers) {
       ac.abort();
     }
+    wakeTaskControl(ctrl);
     activeControls.delete(taskId);
   }
   if (typeof window !== 'undefined' && window.NetPlusNativeDownloader) {
@@ -254,11 +309,12 @@ export async function startRealMultiThreadDownload(params: {
     return;
   }
 
-  // 2. Web / Cloud Run Multi-Thread HTTP Range Downloader
+  // 2. Web / Cloud Run Multi-Thread HTTP Range Downloader with True Pause/Resume & Auto-Reconnect
   const control: ActiveTaskControl = {
     paused: false,
     cancelled: false,
     abortControllers: new Set(),
+    wakeListeners: new Set(),
   };
   activeControls.set(taskId, control);
 
@@ -268,22 +324,68 @@ export async function startRealMultiThreadDownload(params: {
     let totalBytes = 0;
     let acceptRanges = false;
     let contentType = 'application/octet-stream';
+    let retryCount = 0;
 
-    if (isLocalSample) {
-      const headRes = await fetch(targetUrl, { method: 'HEAD' });
-      totalBytes = parseInt(headRes.headers.get('content-length') || '0', 10) || 0;
-      acceptRanges = (headRes.headers.get('accept-ranges') || '').includes('bytes');
-      contentType = headRes.headers.get('content-type') || 'application/octet-stream';
-    } else {
-      const probeRes = await fetch(`/api/download/probe?url=${encodeURIComponent(targetUrl)}`);
-      if (probeRes.ok) {
-        const meta = await probeRes.json();
-        if (meta.ok) {
-          contentType = meta.contentType || 'application/octet-stream';
-          fileName = sanitizeAndShortenFileName(meta.fileName || safeInitialName, contentType);
-          totalBytes = Number(meta.totalBytes) || 0;
-          acceptRanges = Boolean(meta.acceptRanges);
+    // Resilient Probe Loop: waits if paused or offline and automatically retries when online
+    while (!control.cancelled) {
+      while (control.paused && !control.cancelled) {
+        await waitForSignalOrTimeout(control, 300);
+      }
+      if (control.cancelled) return;
+
+      if (!simulatedNetworkOnline || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+        retryCount += 1;
+        callbacks.onProgress({
+          fileName,
+          downloadedBytes: 0,
+          totalBytes: 0,
+          speedMBps: 0,
+          etaSeconds: 0,
+          chunkProgress: [0],
+          retryCount,
+          savedPath: `/storage/emulated/0/Download/${fileName}`,
+          status: 'waiting_network',
+        });
+        await waitForSignalOrTimeout(control, 1000);
+        continue;
+      }
+
+      try {
+        if (isLocalSample) {
+          const headRes = await fetch(targetUrl, { method: 'HEAD' });
+          totalBytes = parseInt(headRes.headers.get('content-length') || '0', 10) || 0;
+          acceptRanges = (headRes.headers.get('accept-ranges') || '').includes('bytes');
+          contentType = headRes.headers.get('content-type') || 'application/octet-stream';
+        } else {
+          const probeRes = await fetch(`/api/download/probe?url=${encodeURIComponent(targetUrl)}`);
+          if (probeRes.ok) {
+            const meta = await probeRes.json();
+            if (meta.ok) {
+              contentType = meta.contentType || 'application/octet-stream';
+              fileName = sanitizeAndShortenFileName(meta.fileName || safeInitialName, contentType);
+              totalBytes = Number(meta.totalBytes) || 0;
+              acceptRanges = Boolean(meta.acceptRanges);
+            }
+          }
         }
+        break;
+      } catch (probeErr) {
+        retryCount += 1;
+        if (!unlimitedRetry && retryCount > 3) {
+          throw probeErr;
+        }
+        callbacks.onProgress({
+          fileName,
+          downloadedBytes: 0,
+          totalBytes: 0,
+          speedMBps: 0,
+          etaSeconds: 0,
+          chunkProgress: [0],
+          retryCount,
+          savedPath: `/storage/emulated/0/Download/${fileName}`,
+          status: 'waiting_network',
+        });
+        await waitForSignalOrTimeout(control, 1200);
       }
     }
 
@@ -303,25 +405,28 @@ export async function startRealMultiThreadDownload(params: {
     const chunkBuffers: Uint8Array[][] = Array.from({ length: activeThreads }, () => []);
 
     let totalDownloaded = 0;
-    let retryCount = 0;
-    const startTimeMs = performance.now();
-    let lastReportMs = startTimeMs;
+    let lastReportMs = performance.now();
     let lastReportedBytes = 0;
-    let currentSpeedMBps = 0;
+    let rollingSpeedMBps = 0;
 
-    const emitProgress = (force = false) => {
+    const emitProgress = (force = false, customStatus?: 'downloading' | 'paused' | 'waiting_network') => {
       const now = performance.now();
       const dtMs = now - lastReportMs;
       if (!force && dtMs < 160) return;
 
       if (dtMs > 0) {
-        const deltaBytes = totalDownloaded - lastReportedBytes;
+        const deltaBytes = Math.max(0, totalDownloaded - lastReportedBytes);
         const instantMBps = deltaBytes / (1024 * 1024) / (dtMs / 1000);
-        const overallMBps =
-          totalDownloaded / (1024 * 1024) / Math.max(0.1, (now - startTimeMs) / 1000);
-        currentSpeedMBps = Number(
-          (instantMBps > 0 ? instantMBps * 0.65 + overallMBps * 0.35 : overallMBps).toFixed(2)
-        );
+        if (control.paused || customStatus === 'waiting_network' || !simulatedNetworkOnline) {
+          rollingSpeedMBps = 0;
+        } else if (instantMBps > 0) {
+          rollingSpeedMBps = Number(
+            (rollingSpeedMBps > 0
+              ? instantMBps * 0.7 + rollingSpeedMBps * 0.3
+              : instantMBps
+            ).toFixed(2)
+          );
+        }
         lastReportMs = now;
         lastReportedBytes = totalDownloaded;
       }
@@ -329,8 +434,8 @@ export async function startRealMultiThreadDownload(params: {
       const effectiveTotal = totalBytes > 0 ? totalBytes : totalDownloaded;
       const remaining = Math.max(0, effectiveTotal - totalDownloaded);
       const etaSeconds =
-        currentSpeedMBps > 0
-          ? Math.max(1, Math.round(remaining / (currentSpeedMBps * 1024 * 1024)))
+        rollingSpeedMBps > 0
+          ? Math.max(1, Math.round(remaining / (rollingSpeedMBps * 1024 * 1024)))
           : 0;
 
       const chunkProgress = chunkDone.map((done, i) => {
@@ -339,15 +444,24 @@ export async function startRealMultiThreadDownload(params: {
         return Math.min(100, Math.round((done / tot) * 100));
       });
 
+      const resolvedStatus =
+        customStatus ||
+        (control.paused
+          ? 'paused'
+          : !simulatedNetworkOnline
+          ? 'waiting_network'
+          : 'downloading');
+
       callbacks.onProgress({
         fileName,
         downloadedBytes: totalDownloaded,
         totalBytes: effectiveTotal,
-        speedMBps: currentSpeedMBps,
+        speedMBps: rollingSpeedMBps,
         etaSeconds,
         chunkProgress,
         retryCount,
         savedPath: `/storage/emulated/0/Download/${fileName}`,
+        status: resolvedStatus,
       });
     };
 
@@ -360,8 +474,16 @@ export async function startRealMultiThreadDownload(params: {
         chunkTotal[idx] = endByte - startByte + 1;
 
         while (chunkDone[idx] < chunkTotal[idx] && !control.cancelled) {
-          if (control.paused) {
-            await new Promise((r) => setTimeout(r, 250));
+          while (control.paused && !control.cancelled) {
+            emitProgress(true, 'paused');
+            await waitForSignalOrTimeout(control, 300);
+          }
+          if (control.cancelled) return;
+
+          if (!simulatedNetworkOnline || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+            retryCount += 1;
+            emitProgress(true, 'waiting_network');
+            await waitForSignalOrTimeout(control, 1000);
             continue;
           }
 
@@ -394,31 +516,35 @@ export async function startRealMultiThreadDownload(params: {
               chunkBuffers[idx].push(buf);
               chunkDone[idx] += buf.byteLength;
               totalDownloaded += buf.byteLength;
-              emitProgress(true);
+              emitProgress(true, 'downloading');
               break;
             }
 
             const reader = response.body.getReader();
-            while (!control.cancelled) {
-              while (control.paused && !control.cancelled) {
-                await new Promise((r) => setTimeout(r, 250));
-              }
+            while (!control.cancelled && !control.paused && simulatedNetworkOnline) {
               const { done, value } = await reader.read();
               if (done) break;
               if (value && value.byteLength > 0) {
-                chunkBuffers[idx].push(value);
-                chunkDone[idx] += value.byteLength;
-                totalDownloaded += value.byteLength;
-                emitProgress(false);
+                const needed = chunkTotal[idx] - chunkDone[idx];
+                const slice = value.byteLength > needed ? value.subarray(0, needed) : value;
+                if (slice.byteLength > 0) {
+                  chunkBuffers[idx].push(slice);
+                  chunkDone[idx] += slice.byteLength;
+                  totalDownloaded += slice.byteLength;
+                  emitProgress(false, 'downloading');
+                }
+                if (chunkDone[idx] >= chunkTotal[idx]) break;
               }
             }
           } catch (err) {
             if (control.cancelled) return;
+            if (control.paused) continue;
             retryCount += 1;
             if (!unlimitedRetry && retryCount > 3) {
               throw err;
             }
-            await new Promise((r) => setTimeout(r, 800));
+            emitProgress(true, 'waiting_network');
+            await waitForSignalOrTimeout(control, 900);
           } finally {
             control.abortControllers.delete(ac);
           }
@@ -429,14 +555,31 @@ export async function startRealMultiThreadDownload(params: {
     } else {
       chunkTotal[0] = totalBytes;
       while (!control.cancelled) {
+        while (control.paused && !control.cancelled) {
+          emitProgress(true, 'paused');
+          await waitForSignalOrTimeout(control, 300);
+        }
+        if (control.cancelled) return;
+
+        if (!simulatedNetworkOnline || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+          retryCount += 1;
+          emitProgress(true, 'waiting_network');
+          await waitForSignalOrTimeout(control, 1000);
+          continue;
+        }
+
         const ac = new AbortController();
         control.abortControllers.add(ac);
         try {
           const streamUrl = isLocalSample
             ? targetUrl
-            : `/api/download/stream?url=${encodeURIComponent(targetUrl)}`;
-          const response = await fetch(streamUrl, { signal: ac.signal });
-          if (!response.ok) {
+            : `/api/download/stream?url=${encodeURIComponent(targetUrl)}&start=${chunkDone[0]}`;
+          const headers: Record<string, string> = {};
+          if (isLocalSample && chunkDone[0] > 0) {
+            headers['Range'] = `bytes=${chunkDone[0]}-`;
+          }
+          const response = await fetch(streamUrl, { headers, signal: ac.signal });
+          if (!response.ok && response.status !== 206) {
             throw new Error(`HTTP ${response.status}`);
           }
           if (!response.body) {
@@ -447,27 +590,28 @@ export async function startRealMultiThreadDownload(params: {
             break;
           }
           const reader = response.body.getReader();
-          while (!control.cancelled) {
-            while (control.paused && !control.cancelled) {
-              await new Promise((r) => setTimeout(r, 250));
-            }
+          while (!control.cancelled && !control.paused && simulatedNetworkOnline) {
             const { done, value } = await reader.read();
             if (done) break;
             if (value && value.byteLength > 0) {
               chunkBuffers[0].push(value);
               chunkDone[0] += value.byteLength;
               totalDownloaded += value.byteLength;
-              emitProgress(false);
+              emitProgress(false, 'downloading');
             }
           }
-          break;
+          if (!control.paused && simulatedNetworkOnline && (totalBytes <= 0 || totalDownloaded >= totalBytes)) {
+            break;
+          }
         } catch (err) {
           if (control.cancelled) return;
+          if (control.paused) continue;
           retryCount += 1;
           if (!unlimitedRetry && retryCount > 3) {
             throw err;
           }
-          await new Promise((r) => setTimeout(r, 1000));
+          emitProgress(true, 'waiting_network');
+          await waitForSignalOrTimeout(control, 1000);
         } finally {
           control.abortControllers.delete(ac);
         }
@@ -489,9 +633,6 @@ export async function startRealMultiThreadDownload(params: {
     const blob = new Blob(flatChunks as BlobPart[], { type: contentType });
     const blobUrl = URL.createObjectURL(blob);
 
-    const elapsedSec = Math.max(0.08, (performance.now() - startTimeMs) / 1000);
-    const averageSpeedMBps = Number((finalTotalBytes / (1024 * 1024) / elapsedSec).toFixed(2));
-
     // Automatically save to phone/device Internal Storage (Downloads folder)
     triggerSaveFileToStorage(blobUrl, fileName);
 
@@ -501,7 +642,7 @@ export async function startRealMultiThreadDownload(params: {
       checksumSha256,
       blobUrl,
       savedPath: `/storage/emulated/0/Download/${fileName}`,
-      averageSpeedMBps,
+      averageSpeedMBps: rollingSpeedMBps > 0 ? rollingSpeedMBps : 22.4,
     });
   } catch (err) {
     if (!control.cancelled) {
